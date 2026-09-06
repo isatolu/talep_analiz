@@ -293,9 +293,17 @@ def build_ohlcv(flow, volume, base_price, wick_strength, y_max):
         prev_close = close[i]
 
     avg_vol = volume.mean() if volume.mean() > 0 else 1.0
-    unit = y_max * 0.05
-    rng = np.random.default_rng(42)
 
+    # Fitil birimi artık Y ekseni (net talep aralığı) yerine FİYATIN KENDİ
+    # hareket ölçeğine göre belirleniyor - aksi halde fiyat büyük bir aralığa
+    # yayıldığında fitiller oransal olarak görünmez kalıyordu.
+    body_sizes = np.abs(close - open_)
+    avg_body = body_sizes.mean()
+    if avg_body <= 0:
+        avg_body = max(base_price * 0.01, 0.5)
+    unit = avg_body * 0.8
+
+    rng = np.random.default_rng(42)
     high = np.zeros(n)
     low = np.zeros(n)
     for i in range(n):
