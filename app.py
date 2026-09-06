@@ -29,8 +29,6 @@ from streamlit_drawable_canvas import st_canvas
 # ----------------------------------------------------------------------
 BAR_PX = 14              # her bar'ın canvas üzerindeki piksel genişliği
 CANVAS_HEIGHT = 420      # çizim alanı yüksekliği (öncekinden daha büyük)
-STROKE_COLOR = "#1f2937"
-DARKNESS_THRESHOLD = 400
 LINE_PALETTE = [
     "#2563eb", "#f97316", "#16a34a", "#dc2626", "#9333ea",
     "#0891b2", "#ca8a04", "#db2777", "#059669", "#4338ca",
@@ -87,19 +85,23 @@ with st.sidebar:
 
     total_bars = st.session_state.total_bars
 
-    window_size_max = clamp(total_bars, 20, 150)
+    window_size_max = max(20, total_bars)
     window_size = st.slider(
         "Görünen pencere genişliği (bar)", min_value=20, max_value=window_size_max,
-        value=clamp(80, 20, window_size_max), step=5,
+        value=window_size_max, step=10,
         key=f"window_size_{window_size_max}",
     )
 
     max_start = max(0, total_bars - window_size)
-    window_start = st.slider(
-        "Pencere başlangıcı (kaydırma)", min_value=0, max_value=max_start,
-        value=0, step=1,
-        key=f"window_start_{total_bars}_{window_size}",
-    )
+    if max_start == 0:
+        window_start = 0
+        st.caption("Pencere tüm bar'ları kapsıyor, kaydırmaya gerek yok.")
+    else:
+        window_start = st.slider(
+            "Pencere başlangıcı (kaydırma)", min_value=0, max_value=max_start,
+            value=0, step=1,
+            key=f"window_start_{total_bars}_{window_size}",
+        )
 
     y_max = st.slider("Değer aralığı (Y ekseni, +/-)", min_value=1, max_value=50, value=10)
 
@@ -131,7 +133,7 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height):
         bar_idx = window_start + j
         left = j * BAR_PX
         strong = bar_idx % 20 == 0
-        color = "rgba(255,255,255,0.16)" if strong else "rgba(255,255,255,0.06)"
+        color = "rgba(0,0,0,0.22)" if strong else "rgba(0,0,0,0.08)"
         parts.append(
             f'<div style="position:absolute; left:{left}px; top:0; width:1px; '
             f'height:{canvas_height}px; background:{color};"></div>'
@@ -151,10 +153,16 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height):
     """
 
 
-def extract_stroke_values(image_data, window_size, canvas_height, y_max):
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, tol=45):
     arr = np.array(image_data)[:, :, :3].astype(int)
-    darkness = arr.sum(axis=2)
-    drawn_mask = darkness < DARKNESS_THRESHOLD
+    target = np.array(hex_to_rgb(target_color_hex))
+    dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
+    drawn_mask = dist < tol
 
     values = np.full(window_size, np.nan)
     for j in range(window_size):
@@ -201,10 +209,12 @@ st.title("Net Talep Farkı ile Sentetik Grafik Oluşturucu")
 with st.expander("Nasıl kullanılır?", expanded=False):
     st.markdown(
         """
-1. Tuvale fare ile bir çizgi çiz (yukarı = pozitif net talep, aşağı = negatif). Sol taraftaki
-   sayılar değer aralığını, alttaki sayılar bar numarasını gösterir.
-2. **Çizgiyi Ekle (ADD)** ile listeye ekle — grafik otomatik güncellenir.
-3. İstediğin kadar çizgi ekle, listeden istediğini **Kaldır** ile sil.
+1. Tuvale fare ile bir çizgi çiz. Şu an hangi renkle çizdiğin canvas'ın altında yazar —
+   bu renk, çizgiyi eklediğinde onun kalıcı rengi olacak (legend'daki ile aynı).
+2. **Çizgiyi Ekle (ADD)** ile listeye ekle — grafik otomatik güncellenir. Çizgi canvas'ta
+   **silinmeden kalır**, böylece bir sonraki çizgiyi öncekiyle kıyaslayarak çizebilirsin.
+3. İstediğin kadar çizgi ekle, listeden istediğini **Kaldır** ile sil (canvas'taki iz
+   kalabilir, sadece görsel referans amaçlıdır — hesaplamaya dahil edilmez).
 4. **Bilinen sınırlama:** bir çizgi sadece o an görünen pencereyi kaplar. Daha geniş bir
    aralığı doldurmak için pencereyi kaydırıp yeni bir çizgi daha ekleyebilirsin. Hiçbir
    çizginin kapsamadığı bar'lar grafikte gri gölgeyle işaretlenir (o bölgede akış = 0 kabul edilir).
@@ -219,6 +229,7 @@ with col_axis:
 
 with col_canvas:
     canvas_key = f"canvas_{st.session_state.canvas_version}_{window_start}_{window_size}"
+    active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
     st.markdown(
         grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT),
@@ -226,8 +237,8 @@ with col_canvas:
     )
     canvas_result = st_canvas(
         fill_color="rgba(255,255,255,0)",
-        stroke_width=3,
-        stroke_color=STROKE_COLOR,
+        stroke_width=2,
+        stroke_color=active_color,
         background_color="#FFFFFF",
         update_streamlit=True,
         height=CANVAS_HEIGHT,
@@ -236,6 +247,7 @@ with col_canvas:
         key=canvas_key,
     )
     st.markdown(bar_axis_html(window_size, window_start, canvas_width), unsafe_allow_html=True)
+    st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
 
     add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
 
@@ -263,21 +275,21 @@ if add_clicked:
     if canvas_result.image_data is None:
         st.warning("Önce tuvale bir çizgi çiz.")
     else:
-        stroke_values = extract_stroke_values(canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max)
+        stroke_values = extract_stroke_values(
+            canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color
+        )
         if np.all(np.isnan(stroke_values)):
-            st.warning("Çizim algılanamadı, tekrar dener misin?")
+            st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
         else:
             full_values = np.full(st.session_state.total_bars, np.nan)
             full_values[window_start:window_start + window_size] = stroke_values
 
             new_id = st.session_state.next_line_id
             st.session_state.next_line_id += 1
-            color = LINE_PALETTE[(new_id - 1) % len(LINE_PALETTE)]
 
             st.session_state.lines.append({
-                "id": new_id, "name": f"Line {new_id}", "color": color, "values": full_values,
+                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
             })
-            st.session_state.canvas_version += 1
             st.rerun()
 
 
