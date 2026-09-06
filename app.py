@@ -27,8 +27,8 @@ from streamlit_drawable_canvas import st_canvas
 # ----------------------------------------------------------------------
 # Sabitler
 # ----------------------------------------------------------------------
-BAR_PX = 14              # her bar'ın canvas üzerindeki piksel genişliği
-CANVAS_HEIGHT = 420      # çizim alanı yüksekliği (öncekinden daha büyük)
+CANVAS_WIDTH = 1400     # sabit çizim/grafik genişliği (px) - artık genişlemiyor
+CANVAS_HEIGHT = 420
 LINE_PALETTE = [
     "#2563eb", "#f97316", "#16a34a", "#dc2626", "#9333ea",
     "#0891b2", "#ca8a04", "#db2777", "#059669", "#4338ca",
@@ -40,7 +40,7 @@ st.set_page_config(page_title="Net Talep Farkı Simülatörü", layout="wide")
 # Session state
 # ----------------------------------------------------------------------
 defaults = {
-    "total_bars": 500,
+    "total_bars": 150,
     "lines": [],
     "canvas_version": 0,
     "next_line_id": 1,
@@ -76,32 +76,18 @@ with st.sidebar:
     st.header("Ayarlar")
 
     new_total_bars = st.number_input(
-        "Toplam bar sayısı", min_value=50, max_value=2000,
-        value=int(st.session_state.total_bars), step=50,
+        "Toplam bar sayısı", min_value=20, max_value=300,
+        value=int(st.session_state.total_bars), step=10,
     )
     if new_total_bars != st.session_state.total_bars:
         resize_lines(new_total_bars)
         st.session_state.total_bars = new_total_bars
 
     total_bars = st.session_state.total_bars
-
-    window_size_max = max(20, total_bars)
-    window_size = st.slider(
-        "Görünen pencere genişliği (bar)", min_value=20, max_value=window_size_max,
-        value=window_size_max, step=10,
-        key=f"window_size_{window_size_max}",
-    )
-
-    max_start = max(0, total_bars - window_size)
-    if max_start == 0:
-        window_start = 0
-        st.caption("Pencere tüm bar'ları kapsıyor, kaydırmaya gerek yok.")
-    else:
-        window_start = st.slider(
-            "Pencere başlangıcı (kaydırma)", min_value=0, max_value=max_start,
-            value=0, step=1,
-            key=f"window_start_{total_bars}_{window_size}",
-        )
+    window_size = total_bars   # artık kaydırma yok, pencere = toplam
+    window_start = 0
+    bar_px = CANVAS_WIDTH / total_bars
+    st.caption(f"Bar başına ~{bar_px:.1f}px. Bar sayısı arttıkça çizim hassasiyeti düşer.")
 
     y_max = st.slider("Değer aralığı (Y ekseni, +/-)", min_value=1, max_value=50, value=10)
 
@@ -127,15 +113,16 @@ with st.sidebar:
 ZERO_LINE_COLOR = "#f59e0b"  # amber - net farklı, dikkat çekici
 
 
-def grid_overlay_html(window_size, window_start, canvas_width, canvas_height):
+def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px):
     parts = []
-    for j in range(0, window_size + 1, 5):
+    step = max(1, window_size // 20)
+    for j in range(0, window_size + 1, step):
         bar_idx = window_start + j
-        left = j * BAR_PX
-        strong = bar_idx % 20 == 0
+        left = j * bar_px
+        strong = bar_idx % (step * 4) == 0
         color = "rgba(0,0,0,0.22)" if strong else "rgba(0,0,0,0.08)"
         parts.append(
-            f'<div style="position:absolute; left:{left}px; top:0; width:1px; '
+            f'<div style="position:absolute; left:{left:.1f}px; top:0; width:1px; '
             f'height:{canvas_height}px; background:{color};"></div>'
         )
     mid = canvas_height // 2
@@ -158,7 +145,7 @@ def hex_to_rgb(hex_color):
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, tol=45):
+def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
     arr = np.array(image_data)[:, :, :3].astype(int)
     target = np.array(hex_to_rgb(target_color_hex))
     dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
@@ -166,7 +153,8 @@ def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_
 
     values = np.full(window_size, np.nan)
     for j in range(window_size):
-        x0, x1 = j * BAR_PX, (j + 1) * BAR_PX
+        x0 = int(round(j * bar_px))
+        x1 = max(x0 + 1, int(round((j + 1) * bar_px)))
         rows, _ = np.where(drawn_mask[:, x0:x1])
         if len(rows) > 0:
             y_mean = rows.mean()
@@ -188,14 +176,13 @@ def value_axis_html(canvas_height, y_max):
     """
 
 
-def bar_axis_html(window_size, window_start, canvas_width):
-    """Canvas'ın altına, garanti şekilde görünen bar numarası etiketleri."""
-    step = 10 if window_size <= 100 else 20
+def bar_axis_html(window_size, window_start, canvas_width, bar_px):
+    step = max(1, window_size // 10)
     spans = []
     for j in range(0, window_size, step):
-        left_pct = (j * BAR_PX / canvas_width) * 100
+        left_px = j * bar_px
         spans.append(
-            f'<span style="position:absolute; left:{left_pct:.2f}%; '
+            f'<span style="position:absolute; left:{left_px:.1f}px; '
             f'font-size:11px; color:#9ca3af;">{window_start + j}</span>'
         )
     return f'<div style="position:relative; height:16px; width:{canvas_width}px;">{"".join(spans)}</div>'
@@ -215,24 +202,23 @@ with st.expander("Nasıl kullanılır?", expanded=False):
    **silinmeden kalır**, böylece bir sonraki çizgiyi öncekiyle kıyaslayarak çizebilirsin.
 3. İstediğin kadar çizgi ekle, listeden istediğini **Kaldır** ile sil (canvas'taki iz
    kalabilir, sadece görsel referans amaçlıdır — hesaplamaya dahil edilmez).
-4. **Bilinen sınırlama:** bir çizgi sadece o an görünen pencereyi kaplar. Daha geniş bir
-   aralığı doldurmak için pencereyi kaydırıp yeni bir çizgi daha ekleyebilirsin. Hiçbir
-   çizginin kapsamadığı bar'lar grafikte gri gölgeyle işaretlenir (o bölgede akış = 0 kabul edilir).
+4. Tüm bar'lar tek seferde, sabit genişlikte gösterilir — artık kaydırma/pencere yok.
+   Bar sayısını artırırsan bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
         """
     )
 
-canvas_width = window_size * BAR_PX
+canvas_width = CANVAS_WIDTH
 col_axis, col_canvas, col_legend = st.columns([0.06, 0.74, 0.20])
 
 with col_axis:
     st.markdown(value_axis_html(CANVAS_HEIGHT, y_max), unsafe_allow_html=True)
 
 with col_canvas:
-    canvas_key = f"canvas_{st.session_state.canvas_version}_{window_start}_{window_size}"
+    canvas_key = f"canvas_{st.session_state.canvas_version}_{total_bars}"
     active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
     st.markdown(
-        grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT),
+        grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px),
         unsafe_allow_html=True,
     )
     canvas_result = st_canvas(
@@ -246,7 +232,7 @@ with col_canvas:
         drawing_mode="freedraw",
         key=canvas_key,
     )
-    st.markdown(bar_axis_html(window_size, window_start, canvas_width), unsafe_allow_html=True)
+    st.markdown(bar_axis_html(window_size, window_start, canvas_width, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
 
     add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
@@ -276,7 +262,7 @@ if add_clicked:
         st.warning("Önce tuvale bir çizgi çiz.")
     else:
         stroke_values = extract_stroke_values(
-            canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color
+            canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color, bar_px
         )
         if np.all(np.isnan(stroke_values)):
             st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
@@ -338,51 +324,54 @@ try:
             "Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume,
         })
 
-        st.subheader("Sonuç")
-        if not covered.all():
-            st.caption("Gri gölgeli bölgeler: hiçbir çizginin kapsamadığı bar'lar (akış = 0 kabul edildi).")
+        _, result_col, _ = st.columns([0.06, 0.74, 0.20])
+        with result_col:
+            st.subheader("Sonuç")
+            if not covered.all():
+                st.caption("Gri gölgeli bölgeler: hiçbir çizginin kapsamadığı bar'lar (akış = 0 kabul edildi).")
 
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.72, 0.28], vertical_spacing=0.03,
-        )
-        fig.add_trace(
-            go.Candlestick(
-                x=df["bar"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-                name="Fiyat", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
-            ),
-            row=1, col=1,
-        )
-        fig.add_trace(
-            go.Bar(x=df["bar"], y=df["Volume"], name="Hacim", marker_color="rgba(37,99,235,0.5)"),
-            row=2, col=1,
-        )
+            fig = make_subplots(
+                rows=2, cols=1, shared_xaxes=True,
+                row_heights=[0.72, 0.28], vertical_spacing=0.03,
+            )
+            fig.add_trace(
+                go.Candlestick(
+                    x=df["bar"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+                    name="Fiyat", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
+                ),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Bar(x=df["bar"], y=df["Volume"], name="Hacim", marker_color="rgba(37,99,235,0.5)"),
+                row=2, col=1,
+            )
 
-        # kapsanmayan bölgeleri gölgele
-        in_gap = False
-        gap_start = None
-        for i in range(n):
-            if not covered[i] and not in_gap:
-                in_gap = True
-                gap_start = i + 1
-            elif covered[i] and in_gap:
-                in_gap = False
-                fig.add_vrect(x0=gap_start - 0.5, x1=i + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
-        if in_gap:
-            fig.add_vrect(x0=gap_start - 0.5, x1=n + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
+            # kapsanmayan bölgeleri gölgele
+            in_gap = False
+            gap_start = None
+            for i in range(n):
+                if not covered[i] and not in_gap:
+                    in_gap = True
+                    gap_start = i + 1
+                elif covered[i] and in_gap:
+                    in_gap = False
+                    fig.add_vrect(x0=gap_start - 0.5, x1=i + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
+            if in_gap:
+                fig.add_vrect(x0=gap_start - 0.5, x1=n + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
 
-        fig.update_layout(
-            height=650, xaxis_rangeslider_visible=False, showlegend=False,
-            margin=dict(t=20, b=20, l=20, r=20),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            fig.update_layout(
+                width=CANVAS_WIDTH, height=650,
+                xaxis_rangeslider_visible=False, showlegend=False,
+                margin=dict(t=20, b=20, l=20, r=20),
+            )
+            st.plotly_chart(fig)
 
-        st.download_button(
-            "OHLCV verisini CSV olarak indir",
-            df.to_csv(index=False).encode("utf-8"),
-            file_name="sentetik_ohlcv.csv",
-            mime="text/csv",
-        )
+            st.download_button(
+                "OHLCV verisini CSV olarak indir",
+                df.to_csv(index=False).encode("utf-8"),
+                file_name="sentetik_ohlcv.csv",
+                mime="text/csv",
+            )
 except Exception:
     st.error("Grafik oluşturulurken beklenmeyen bir hata oluştu. Detayları aşağıda paylaşabilirsin.")
     with st.expander("Hata detayı (bana gönderebilirsin)"):
