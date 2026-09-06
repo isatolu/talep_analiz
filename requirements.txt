@@ -1,0 +1,6 @@
+streamlit>=1.30
+streamlit-drawable-canvas-fix
+numpy
+pandas
+plotly
+pillow
