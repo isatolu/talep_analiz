@@ -320,7 +320,7 @@ try:
         open_, high, low, close = build_ohlcv(flow_total, volume, base_price, wick_strength, y_max)
 
         df = pd.DataFrame({
-            "bar": np.arange(1, n + 1),
+            "bar": np.arange(0, n),
             "Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume,
         })
 
@@ -346,24 +346,27 @@ try:
                 row=2, col=1,
             )
 
-            # kapsanmayan bölgeleri gölgele
+            # kapsanmayan bölgeleri gölgele (0-tabanlı bar indeksine göre)
             in_gap = False
             gap_start = None
             for i in range(n):
                 if not covered[i] and not in_gap:
                     in_gap = True
-                    gap_start = i + 1
+                    gap_start = i
                 elif covered[i] and in_gap:
                     in_gap = False
-                    fig.add_vrect(x0=gap_start - 0.5, x1=i + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
+                    fig.add_vrect(x0=gap_start - 0.5, x1=i - 0.5, fillcolor="gray", opacity=0.12, line_width=0)
             if in_gap:
-                fig.add_vrect(x0=gap_start - 0.5, x1=n + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
+                fig.add_vrect(x0=gap_start - 0.5, x1=n - 0.5, fillcolor="gray", opacity=0.12, line_width=0)
 
+            fig.update_xaxes(range=[-0.5, n - 0.5])
+            fig.update_yaxes(showticklabels=False)
             fig.update_layout(
                 width=CANVAS_WIDTH, height=650,
                 xaxis_rangeslider_visible=False, showlegend=False,
-                margin=dict(t=20, b=20, l=20, r=20),
+                margin=dict(t=20, b=20, l=0, r=0),
             )
+            st.caption("Hizalama için fiyat eksen etiketleri gizlendi — değerleri görmek için mumların üzerine gel.")
             st.plotly_chart(fig)
 
             st.download_button(
