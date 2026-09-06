@@ -1,14 +1,21 @@
 """
-Net Talep Farkı ile Sentetik Grafik Oluşturucu - Aşama 1
-----------------------------------------------------------
-Kullanıcı farklı "net talep" çizgilerini (akış / flow) fare ile çizer.
-Her çizgi ADD ile eklenir. GRAPH butonuna basıldığında:
-  - Tüm çizgilerin bar bazlı toplamı alınır (toplam net akış)
-  - Bu akış bir önceki kapanışa eklenerek kümülatif fiyat (close) bulunur
-  - Hacim = o bardaki tüm çizgilerin mutlak değerlerinin toplamı
-  - Fitiller (kozmetik) hacme oranla uzar/kısalır
-  - Sonuç mum grafik + hacim barları olarak çizilir
+Net Talep Farkı ile Sentetik Grafik Oluşturucu - Aşama 1 (v2)
+----------------------------------------------------------------
+v1'e göre değişenler:
+  - Çizim alanı büyütüldü
+  - Sıfır çizgisi / değer ekseni artık canvas'ın kendi arka plan resmine
+    bağımlı değil; yan tarafta garanti şekilde HTML/CSS ile gösteriliyor
+    (bazı tarayıcı/versiyon kombinasyonlarında canvas'ın background_image
+    özelliği görünmeyebiliyor, bu yüzden ayrı ve güvenilir bir gösterim ekledik)
+  - Varsayılan toplam bar sayısı 500'e çıkarıldı
+  - ADD / REMOVE sonrası grafik artık otomatik güncelleniyor, GRAPH butonuna
+    basmaya gerek yok
+  - Çizgi kapsamayan (veri olmayan) bölgeler grafikte gölgeli gösteriliyor
+  - Beklenmeyen hatalar artık sayfayı tamamen çökertmiyor, okunabilir bir
+    mesaj gösteriliyor
 """
+
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -21,10 +28,10 @@ from streamlit_drawable_canvas import st_canvas
 # ----------------------------------------------------------------------
 # Sabitler
 # ----------------------------------------------------------------------
-BAR_PX = 10  # her bar'ın canvas üzerindeki piksel genişliği
-CANVAS_HEIGHT = 320
-STROKE_COLOR = "#1f2937"  # çizim rengi (koyu lacivert) - arka plandan ayırt edilebilmesi için
-DARKNESS_THRESHOLD = 400  # R+G+B toplamı bu değerin altındaysa "çizilmiş" say
+BAR_PX = 14              # her bar'ın canvas üzerindeki piksel genişliği
+CANVAS_HEIGHT = 420      # çizim alanı yüksekliği (öncekinden daha büyük)
+STROKE_COLOR = "#1f2937"
+DARKNESS_THRESHOLD = 400
 LINE_PALETTE = [
     "#2563eb", "#f97316", "#16a34a", "#dc2626", "#9333ea",
     "#0891b2", "#ca8a04", "#db2777", "#059669", "#4338ca",
@@ -33,23 +40,23 @@ LINE_PALETTE = [
 st.set_page_config(page_title="Net Talep Farkı Simülatörü", layout="wide")
 
 # ----------------------------------------------------------------------
-# Session state başlangıç değerleri
+# Session state
 # ----------------------------------------------------------------------
-if "total_bars" not in st.session_state:
-    st.session_state.total_bars = 100
-if "lines" not in st.session_state:
-    st.session_state.lines = []  # her biri: {"id", "name", "color", "values": np.array(total_bars)}
-if "canvas_version" not in st.session_state:
-    st.session_state.canvas_version = 0
-if "next_line_id" not in st.session_state:
-    st.session_state.next_line_id = 1
-if "result" not in st.session_state:
-    st.session_state.result = None  # GRAPH sonucu burada tutulur
+defaults = {
+    "total_bars": 500,
+    "lines": [],
+    "canvas_version": 0,
+    "next_line_id": 1,
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 def resize_lines(new_total):
-    """Toplam bar sayısı değiştiğinde mevcut çizgilerin dizilerini uyumlu hale getirir."""
-    old_total = len(st.session_state.lines[0]["values"]) if st.session_state.lines else new_total
+    if not st.session_state.lines:
+        return
+    old_total = len(st.session_state.lines[0]["values"])
     if old_total == new_total:
         return
     for line in st.session_state.lines:
@@ -61,30 +68,38 @@ def resize_lines(new_total):
             line["values"] = vals[:new_total]
 
 
+def clamp(value, lo, hi):
+    return max(lo, min(value, hi))
+
+
 # ----------------------------------------------------------------------
-# Kenar çubuğu (sidebar) - genel ayarlar
+# Kenar çubuğu
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.header("Ayarlar")
 
     new_total_bars = st.number_input(
-        "Toplam bar sayısı", min_value=20, max_value=1000,
-        value=st.session_state.total_bars, step=10,
+        "Toplam bar sayısı", min_value=50, max_value=2000,
+        value=int(st.session_state.total_bars), step=50,
     )
     if new_total_bars != st.session_state.total_bars:
         resize_lines(new_total_bars)
         st.session_state.total_bars = new_total_bars
 
-    window_size = st.slider(
-        "Görünen pencere genişliği (bar)", min_value=20, max_value=100,
-        value=min(50, st.session_state.total_bars), step=5,
-    )
-    window_size = min(window_size, st.session_state.total_bars)
+    total_bars = st.session_state.total_bars
 
-    max_start = max(0, st.session_state.total_bars - window_size)
+    window_size_max = clamp(total_bars, 20, 150)
+    window_size = st.slider(
+        "Görünen pencere genişliği (bar)", min_value=20, max_value=window_size_max,
+        value=clamp(80, 20, window_size_max), step=5,
+        key=f"window_size_{window_size_max}",
+    )
+
+    max_start = max(0, total_bars - window_size)
     window_start = st.slider(
         "Pencere başlangıcı (kaydırma)", min_value=0, max_value=max_start,
         value=0, step=1,
+        key=f"window_start_{total_bars}_{window_size}",
     )
 
     y_max = st.slider("Değer aralığı (Y ekseni, +/-)", min_value=1, max_value=50, value=10)
@@ -96,40 +111,27 @@ with st.sidebar:
     st.markdown("---")
     if st.button("🗑 Tüm çizgileri temizle"):
         st.session_state.lines = []
-        st.session_state.result = None
         st.session_state.canvas_version += 1
         st.rerun()
 
 
 # ----------------------------------------------------------------------
-# Arka plan görseli (grid + sıfır çizgisi) oluştur
+# Arka plan görseli (best-effort; asıl referans aşağıdaki HTML etiketler)
 # ----------------------------------------------------------------------
-def make_background(window_size, window_start, total_bars, canvas_height):
+def make_background(window_size, window_start, canvas_height):
     width = window_size * BAR_PX
     img = Image.new("RGB", (width, canvas_height), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-
     for j in range(window_size + 1):
         x = j * BAR_PX
         bar_idx = window_start + j
         color = (225, 225, 225) if bar_idx % 10 == 0 else (245, 245, 245)
         draw.line([(x, 0), (x, canvas_height)], fill=color, width=1)
-
-    # sıfır çizgisi
     mid_y = canvas_height // 2
     draw.line([(0, mid_y), (width, mid_y)], fill=(190, 190, 190), width=1)
-
-    # her 10 barda bir etiket
-    for j in range(0, window_size, 10):
-        bar_idx = window_start + j
-        draw.text((j * BAR_PX + 2, 2), str(bar_idx), fill=(160, 160, 160))
-
     return img
 
 
-# ----------------------------------------------------------------------
-# Canvas'tan çizilen tek çizgiyi bar başına değerlere çevir
-# ----------------------------------------------------------------------
 def extract_stroke_values(image_data, window_size, canvas_height, y_max):
     arr = np.array(image_data)[:, :, :3].astype(int)
     darkness = arr.sum(axis=2)
@@ -145,6 +147,33 @@ def extract_stroke_values(image_data, window_size, canvas_height, y_max):
     return values
 
 
+def value_axis_html(canvas_height, y_max):
+    """Canvas'ın soluna, garanti şekilde görünen +/- değer etiketleri."""
+    ticks = [y_max, y_max / 2, 0, -y_max / 2, -y_max]
+    items = "".join(
+        f'<div style="font-size:11px;color:#9ca3af;">{t:g}</div>' for t in ticks
+    )
+    return f"""
+    <div style="height:{canvas_height}px; display:flex; flex-direction:column;
+                justify-content:space-between; text-align:right; padding-right:4px;">
+        {items}
+    </div>
+    """
+
+
+def bar_axis_html(window_size, window_start, canvas_width):
+    """Canvas'ın altına, garanti şekilde görünen bar numarası etiketleri."""
+    step = 10 if window_size <= 100 else 20
+    spans = []
+    for j in range(0, window_size, step):
+        left_pct = (j * BAR_PX / canvas_width) * 100
+        spans.append(
+            f'<span style="position:absolute; left:{left_pct:.2f}%; '
+            f'font-size:11px; color:#9ca3af;">{window_start + j}</span>'
+        )
+    return f'<div style="position:relative; height:16px; width:{canvas_width}px;">{"".join(spans)}</div>'
+
+
 # ----------------------------------------------------------------------
 # Ana sayfa
 # ----------------------------------------------------------------------
@@ -153,18 +182,24 @@ st.title("Net Talep Farkı ile Sentetik Grafik Oluşturucu")
 with st.expander("Nasıl kullanılır?", expanded=False):
     st.markdown(
         """
-1. Aşağıdaki tuvale fare ile istediğin şekilde bir çizgi çiz (yukarı = pozitif net talep, aşağı = negatif).
-2. **Çizgiyi Ekle (ADD)** butonuna bas — çizgi listeye eklenir, tuval temizlenir.
-3. İstediğin kadar çizgi ekle (vade ayrımı yapmana gerek yok, hepsi toplanacak).
-4. Beğenmediğin bir çizgiyi listeden **Kaldır** ile silebilirsin.
-5. Hazır olduğunda **GRAPH** butonuna bas — sonucu en altta göreceksin.
+1. Tuvale fare ile bir çizgi çiz (yukarı = pozitif net talep, aşağı = negatif). Sol taraftaki
+   sayılar değer aralığını, alttaki sayılar bar numarasını gösterir.
+2. **Çizgiyi Ekle (ADD)** ile listeye ekle — grafik otomatik güncellenir.
+3. İstediğin kadar çizgi ekle, listeden istediğini **Kaldır** ile sil.
+4. **Bilinen sınırlama:** bir çizgi sadece o an görünen pencereyi kaplar. Daha geniş bir
+   aralığı doldurmak için pencereyi kaydırıp yeni bir çizgi daha ekleyebilirsin. Hiçbir
+   çizginin kapsamadığı bar'lar grafikte gri gölgeyle işaretlenir (o bölgede akış = 0 kabul edilir).
         """
     )
 
-col_canvas, col_legend = st.columns([3, 1])
+canvas_width = window_size * BAR_PX
+col_axis, col_canvas, col_legend = st.columns([0.06, 0.74, 0.20])
+
+with col_axis:
+    st.markdown(value_axis_html(CANVAS_HEIGHT, y_max), unsafe_allow_html=True)
 
 with col_canvas:
-    bg_image = make_background(window_size, window_start, st.session_state.total_bars, CANVAS_HEIGHT)
+    bg_image = make_background(window_size, window_start, CANVAS_HEIGHT)
     canvas_key = f"canvas_{st.session_state.canvas_version}_{window_start}_{window_size}"
 
     canvas_result = st_canvas(
@@ -175,16 +210,13 @@ with col_canvas:
         background_image=bg_image,
         update_streamlit=True,
         height=CANVAS_HEIGHT,
-        width=window_size * BAR_PX,
+        width=canvas_width,
         drawing_mode="freedraw",
         key=canvas_key,
     )
+    st.markdown(bar_axis_html(window_size, window_start, canvas_width), unsafe_allow_html=True)
 
-    btn_col1, btn_col2 = st.columns(2)
-    with btn_col1:
-        add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
-    with btn_col2:
-        graph_clicked = st.button("📊 GRAPH", type="primary", use_container_width=True)
+    add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
 
 with col_legend:
     st.subheader("Çizgiler")
@@ -222,23 +254,19 @@ if add_clicked:
             color = LINE_PALETTE[(new_id - 1) % len(LINE_PALETTE)]
 
             st.session_state.lines.append({
-                "id": new_id,
-                "name": f"Line {new_id}",
-                "color": color,
-                "values": full_values,
+                "id": new_id, "name": f"Line {new_id}", "color": color, "values": full_values,
             })
             st.session_state.canvas_version += 1
             st.rerun()
 
 
 # ----------------------------------------------------------------------
-# GRAPH işlemi
+# OHLCV hesapla ve otomatik göster
 # ----------------------------------------------------------------------
 def build_ohlcv(flow, volume, base_price, wick_strength, y_max):
     n = len(flow)
     open_ = np.zeros(n)
     close = np.zeros(n)
-
     prev_close = base_price
     for i in range(n):
         open_[i] = prev_close
@@ -246,7 +274,7 @@ def build_ohlcv(flow, volume, base_price, wick_strength, y_max):
         prev_close = close[i]
 
     avg_vol = volume.mean() if volume.mean() > 0 else 1.0
-    unit = y_max * 0.05  # taban fitil birimi (kozmetik)
+    unit = y_max * 0.05
     rng = np.random.default_rng(42)
 
     high = np.zeros(n)
@@ -259,16 +287,14 @@ def build_ohlcv(flow, volume, base_price, wick_strength, y_max):
         split = rng.uniform(0.3, 0.7)
         high[i] = body_top + wick_total * split
         low[i] = body_bot - wick_total * (1 - split)
-
     return open_, high, low, close
 
 
-if graph_clicked:
-    n = st.session_state.total_bars
-    if not st.session_state.lines:
-        st.warning("Grafik oluşturmak için en az bir çizgi eklemelisin.")
-    else:
+try:
+    if st.session_state.lines:
+        n = st.session_state.total_bars
         stacked = np.stack([l["values"] for l in st.session_state.lines])
+        covered = ~np.all(np.isnan(stacked), axis=0)
         flow_total = np.nansum(stacked, axis=0)
         volume = np.nansum(np.abs(stacked), axis=0)
 
@@ -278,36 +304,53 @@ if graph_clicked:
             "bar": np.arange(1, n + 1),
             "Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume,
         })
-        st.session_state.result = df
 
-if st.session_state.result is not None:
-    df = st.session_state.result
-    st.subheader("Sonuç")
+        st.subheader("Sonuç")
+        if not covered.all():
+            st.caption("Gri gölgeli bölgeler: hiçbir çizginin kapsamadığı bar'lar (akış = 0 kabul edildi).")
 
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.72, 0.28], vertical_spacing=0.03,
-    )
-    fig.add_trace(
-        go.Candlestick(
-            x=df["bar"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-            name="Fiyat", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
-        ),
-        row=1, col=1,
-    )
-    fig.add_trace(
-        go.Bar(x=df["bar"], y=df["Volume"], name="Hacim", marker_color="rgba(37,99,235,0.5)"),
-        row=2, col=1,
-    )
-    fig.update_layout(
-        height=650, xaxis_rangeslider_visible=False, showlegend=False,
-        margin=dict(t=20, b=20, l=20, r=20),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.72, 0.28], vertical_spacing=0.03,
+        )
+        fig.add_trace(
+            go.Candlestick(
+                x=df["bar"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+                name="Fiyat", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
+            ),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Bar(x=df["bar"], y=df["Volume"], name="Hacim", marker_color="rgba(37,99,235,0.5)"),
+            row=2, col=1,
+        )
 
-    st.download_button(
-        "OHLCV verisini CSV olarak indir",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name="sentetik_ohlcv.csv",
-        mime="text/csv",
-    )
+        # kapsanmayan bölgeleri gölgele
+        in_gap = False
+        gap_start = None
+        for i in range(n):
+            if not covered[i] and not in_gap:
+                in_gap = True
+                gap_start = i + 1
+            elif covered[i] and in_gap:
+                in_gap = False
+                fig.add_vrect(x0=gap_start - 0.5, x1=i + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
+        if in_gap:
+            fig.add_vrect(x0=gap_start - 0.5, x1=n + 0.5, fillcolor="gray", opacity=0.12, line_width=0)
+
+        fig.update_layout(
+            height=650, xaxis_rangeslider_visible=False, showlegend=False,
+            margin=dict(t=20, b=20, l=20, r=20),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.download_button(
+            "OHLCV verisini CSV olarak indir",
+            df.to_csv(index=False).encode("utf-8"),
+            file_name="sentetik_ohlcv.csv",
+            mime="text/csv",
+        )
+except Exception:
+    st.error("Grafik oluşturulurken beklenmeyen bir hata oluştu. Detayları aşağıda paylaşabilirsin.")
+    with st.expander("Hata detayı (bana gönderebilirsin)"):
+        st.code(traceback.format_exc())
