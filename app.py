@@ -367,7 +367,7 @@ try:
                 margin=dict(t=20, b=20, l=0, r=0),
             )
             st.caption("Hizalama için fiyat eksen etiketleri gizlendi — değerleri görmek için mumların üzerine gel.")
-            st.plotly_chart(fig)
+            st.plotly_chart(fig, width=CANVAS_WIDTH)
 
             st.download_button(
                 "OHLCV verisini CSV olarak indir",
