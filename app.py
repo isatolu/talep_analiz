@@ -20,7 +20,6 @@ import traceback
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_drawable_canvas import st_canvas
@@ -116,20 +115,40 @@ with st.sidebar:
 
 
 # ----------------------------------------------------------------------
-# Arka plan görseli (best-effort; asıl referans aşağıdaki HTML etiketler)
+# Grid overlay - CANVAS BİLEŞENİNİN KENDİ ARKA PLAN ÖZELLİĞİNE GÜVENMİYORUZ
+# (bazı Streamlit sürümlerinde background_color/background_image çalışmıyor).
+# Bunun yerine, canvas'ın TAM ÜSTÜNE, mouse olaylarını engellemeyen
+# (pointer-events:none) saf bir HTML/CSS katmanı bindiriyoruz. Bu katman
+# component'in içine değil, Streamlit sayfasının kendi DOM'una render
+# olduğu için component'in versiyon uyumluluğundan bağımsız, garanti çalışır.
 # ----------------------------------------------------------------------
-def make_background(window_size, window_start, canvas_height):
-    width = window_size * BAR_PX
-    img = Image.new("RGB", (width, canvas_height), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
-    for j in range(window_size + 1):
-        x = j * BAR_PX
+ZERO_LINE_COLOR = "#f59e0b"  # amber - net farklı, dikkat çekici
+
+
+def grid_overlay_html(window_size, window_start, canvas_width, canvas_height):
+    parts = []
+    for j in range(0, window_size + 1, 5):
         bar_idx = window_start + j
-        color = (225, 225, 225) if bar_idx % 10 == 0 else (245, 245, 245)
-        draw.line([(x, 0), (x, canvas_height)], fill=color, width=1)
-    mid_y = canvas_height // 2
-    draw.line([(0, mid_y), (width, mid_y)], fill=(190, 190, 190), width=1)
-    return img
+        left = j * BAR_PX
+        strong = bar_idx % 20 == 0
+        color = "rgba(255,255,255,0.16)" if strong else "rgba(255,255,255,0.06)"
+        parts.append(
+            f'<div style="position:absolute; left:{left}px; top:0; width:1px; '
+            f'height:{canvas_height}px; background:{color};"></div>'
+        )
+    mid = canvas_height // 2
+    parts.append(
+        f'<div style="position:absolute; left:0; top:{mid}px; width:{canvas_width}px; '
+        f'height:2px; background:{ZERO_LINE_COLOR}; box-shadow:0 0 3px {ZERO_LINE_COLOR};"></div>'
+    )
+    return f"""
+    <div style="position:relative; height:0; margin-bottom:-16px;">
+      <div style="position:absolute; top:0; left:0; width:{canvas_width}px;
+                  height:{canvas_height}px; pointer-events:none; z-index:999;">
+        {''.join(parts)}
+      </div>
+    </div>
+    """
 
 
 def extract_stroke_values(image_data, window_size, canvas_height, y_max):
@@ -199,15 +218,17 @@ with col_axis:
     st.markdown(value_axis_html(CANVAS_HEIGHT, y_max), unsafe_allow_html=True)
 
 with col_canvas:
-    bg_image = make_background(window_size, window_start, CANVAS_HEIGHT)
     canvas_key = f"canvas_{st.session_state.canvas_version}_{window_start}_{window_size}"
 
+    st.markdown(
+        grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT),
+        unsafe_allow_html=True,
+    )
     canvas_result = st_canvas(
         fill_color="rgba(255,255,255,0)",
         stroke_width=3,
         stroke_color=STROKE_COLOR,
         background_color="#FFFFFF",
-        background_image=bg_image,
         update_streamlit=True,
         height=CANVAS_HEIGHT,
         width=canvas_width,
