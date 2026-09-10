@@ -48,6 +48,7 @@ defaults = {
     "calib_top_row": None,      # kalibrasyon: tuvalin GERÇEK üst kenarının ölçülen piksel satırı
     "calib_bottom_row": None,   # kalibrasyon: tuvalin GERÇEK alt kenarının ölçülen piksel satırı
     "calib_actual_h": None,     # kalibrasyon anındaki gerçek görüntü yüksekliği (ölçek dönüşümü için)
+    "overlay_y_offset": 0,      # overlay'i canvas'a tam oturtmak için elle ayarlanan piksel kayması
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -239,8 +240,9 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
         f'style="position:absolute; top:0; left:0;">{lines_svg}{preview_svg}</svg>'
     )
 
+    manual_offset = st.session_state.get("overlay_y_offset", 0)
     return f"""
-    <div style="position:relative; height:0; margin-top:-{canvas_height}px;">
+    <div style="position:relative; height:0; margin-top:-{canvas_height - manual_offset}px;">
       <div style="position:absolute; top:0; left:0; width:{canvas_width}px;
                   height:{canvas_height}px; pointer-events:none; z-index:999; overflow:visible;">
         {''.join(parts)}
@@ -408,6 +410,16 @@ with calib_expander:
         2. Sonra **en alttaki yatay gridline** üzerine (canvas'ın tam alt kenarı) kısa bir iz bırak, **"② Alt Kenarı Kaydet"**'e bas.
         3. İkisi de kaydedilince kalibrasyon tamamlanır ve tüm ölçümler buna göre yapılır — tahmin/kayma kalmaz.
         """
+    )
+    st.markdown("---")
+    st.markdown(
+        "**Overlay hizalama (elle, kesin ayar):** Grid/sıfır çizgisi canvas'ın gerçek "
+        "kenarlarıyla tam örtüşene kadar aşağıdaki kaydırıcıyla ayarla. Pozitif = aşağı kaydır, "
+        "negatif = yukarı kaydır. Bu, CSS'in tahmin edemediği boşluğu senin gözünle kesinleştirir."
+    )
+    st.session_state.overlay_y_offset = st.slider(
+        "Overlay dikey kayma (px)", min_value=-40, max_value=40,
+        value=st.session_state.overlay_y_offset, step=1, key="overlay_offset_slider",
     )
 
 tool = st.radio(
