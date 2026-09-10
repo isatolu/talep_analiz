@@ -114,7 +114,65 @@ with st.sidebar:
 ZERO_LINE_COLOR = "#f59e0b"  # amber - net farklı, dikkat çekici
 
 
-def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px, y_max):
+def bar_to_x(bar, bar_px):
+    return (bar + 0.5) * bar_px
+
+
+def value_to_y(value, y_max, canvas_height):
+    return canvas_height / 2 - (value / y_max) * (canvas_height / 2)
+
+
+def committed_lines_svg(lines, bar_px, y_max, canvas_height):
+    """Eklenmiş tüm çizgileri, kendi verimizden (piksel tahminine gerek kalmadan) SVG olarak çiz."""
+    parts = []
+    for line in lines:
+        vals = line["values"]
+        color = line["color"]
+        n = len(vals)
+        i = 0
+        while i < n:
+            if np.isnan(vals[i]):
+                i += 1
+                continue
+            j = i
+            pts = []
+            while j < n and not np.isnan(vals[j]):
+                x = bar_to_x(j, bar_px)
+                y = value_to_y(vals[j], y_max, canvas_height)
+                pts.append(f"{x:.1f},{y:.1f}")
+                j += 1
+            if len(pts) >= 2:
+                parts.append(
+                    f'<polyline points="{" ".join(pts)}" fill="none" '
+                    f'stroke="{color}" stroke-width="2.5" opacity="0.9"/>'
+                )
+            elif len(pts) == 1:
+                x, y = pts[0].split(",")
+                parts.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{color}" opacity="0.9"/>')
+            i = j
+    return "".join(parts)
+
+
+def polyline_preview_svg(points, bar_px, y_max, canvas_height, color):
+    """Kırık çizgi modunda henüz eklenmemiş, birikmekte olan noktaları göster."""
+    if not points:
+        return ""
+    parts = []
+    pts_px = [(bar_to_x(b, bar_px), value_to_y(v, y_max, canvas_height)) for b, v in points]
+    if len(pts_px) >= 2:
+        pts_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts_px)
+        parts.append(
+            f'<polyline points="{pts_str}" fill="none" stroke="{color}" '
+            f'stroke-width="2" stroke-dasharray="6,4" opacity="0.9"/>'
+        )
+    for idx, (x, y) in enumerate(pts_px):
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="white" stroke="{color}" stroke-width="2"/>')
+        parts.append(f'<text x="{x + 8:.1f}" y="{y - 8:.1f}" font-size="11" fill="{color}">{idx + 1}</text>')
+    return "".join(parts)
+
+
+def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px, y_max,
+                       lines=None, polyline_points=None, preview_color="#000000"):
     parts = []
     # dikey gridler (bar bazlı)
     step = max(1, window_size // 20)
@@ -144,11 +202,20 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
         f'<div style="position:absolute; left:0; top:{mid}px; width:{canvas_width}px; '
         f'height:2px; background:{ZERO_LINE_COLOR}; box-shadow:0 0 3px {ZERO_LINE_COLOR};"></div>'
     )
+
+    lines_svg = committed_lines_svg(lines or [], bar_px, y_max, canvas_height)
+    preview_svg = polyline_preview_svg(polyline_points or [], bar_px, y_max, canvas_height, preview_color)
+    svg_layer = (
+        f'<svg width="{canvas_width}" height="{canvas_height}" '
+        f'style="position:absolute; top:0; left:0;">{lines_svg}{preview_svg}</svg>'
+    )
+
     return f"""
     <div style="position:relative; height:0; margin-bottom:-16px;">
       <div style="position:absolute; top:0; left:0; width:{canvas_width}px;
                   height:{canvas_height}px; pointer-events:none; z-index:999;">
         {''.join(parts)}
+        {svg_layer}
       </div>
     </div>
     """
@@ -238,12 +305,14 @@ with st.expander("Nasıl kullanılır?", expanded=False):
 - **Yatay çizgi:** istediğin yüksekliğe kısa bir iz bırak, ortalaması alınıp
   baştan sona düz bir çizgiye çevrilir.
 - **Kırık çizgi (nokta nokta):** her köşe için tuvale kısa bir iz bırakıp
-  "Nokta Ekle" de. Noktalar aralarında düz çizgilerle birleşir — kare/üçgen
-  dalga çizmek için pratik. Bitirince "Çizgiyi Tamamla" ile ekle.
+  "Nokta Ekle" de — eklediğin noktalar tuval üzerinde numaralı daireler
+  olarak, aralarındaki kesikli çizgiyle birlikte görünür. Bitirince
+  "Çizgiyi Tamamla" ile ekle.
 
-Hangi aracı kullanırsan kullan, sonuç aynı şekilde **Çizgiyi Ekle** listesine
-eklenir; çizgi canvas'ta silinmeden kalır (görsel referans amaçlı, hesaba
-dahil edilmez), rengi legend'daki ile aynıdır.
+**Eklediğin tüm çizgiler, tuvalin üzerinde kendi renkleriyle kalıcı olarak
+çizili kalır** (gerçek veriden, piksel tahmini değil) — böylece çizim
+ekranı ile sonuç grafiğini yan yana karşılaştırabilirsin. Bir çizgiyi
+Kaldır'a bastığında bu çizim de kaybolur.
 
 Tüm bar'lar tek seferde, sabit genişlikte gösterilir. Bar sayısını artırırsan
 bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
@@ -266,7 +335,12 @@ with col_canvas:
     active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
     st.markdown(
-        grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px, y_max),
+        grid_overlay_html(
+            window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px, y_max,
+            lines=st.session_state.lines,
+            polyline_points=st.session_state.polyline_points if tool == "Kırık çizgi (nokta nokta)" else [],
+            preview_color=active_color,
+        ),
         unsafe_allow_html=True,
     )
     canvas_result = st_canvas(
@@ -351,6 +425,7 @@ if add_clicked:
             st.session_state.lines.append({
                 "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
             })
+            st.session_state.canvas_version += 1
             st.rerun()
 
 # ----------------------------------------------------------------------
@@ -375,6 +450,7 @@ if horiz_clicked:
             st.session_state.lines.append({
                 "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
             })
+            st.session_state.canvas_version += 1
             st.rerun()
 
 # ----------------------------------------------------------------------
