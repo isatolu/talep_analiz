@@ -123,11 +123,16 @@ def value_to_y(value, y_max, canvas_height):
 
 
 def committed_lines_svg(lines, bar_px, y_max, canvas_height):
-    """Eklenmiş tüm çizgileri, kendi verimizden (piksel tahminine gerek kalmadan) SVG olarak çiz."""
+    """Eklenmiş tüm çizgileri, kendi verimizden (piksel tahminine gerek kalmadan) SVG olarak çiz.
+    Gizlenmiş çizgiler soluk ve kesik kesik gösterilir."""
     parts = []
     for line in lines:
         vals = line["values"]
         color = line["color"]
+        visible = line.get("visible", True)
+        stroke_width = "2.5" if visible else "1.5"
+        opacity = "0.9" if visible else "0.35"
+        dash = "" if visible else ' stroke-dasharray="5,4"'
         n = len(vals)
         i = 0
         while i < n:
@@ -144,11 +149,11 @@ def committed_lines_svg(lines, bar_px, y_max, canvas_height):
             if len(pts) >= 2:
                 parts.append(
                     f'<polyline points="{" ".join(pts)}" fill="none" '
-                    f'stroke="{color}" stroke-width="2.5" opacity="0.9"/>'
+                    f'stroke="{color}" stroke-width="{stroke_width}" opacity="{opacity}"{dash}/>'
                 )
             elif len(pts) == 1:
                 x, y = pts[0].split(",")
-                parts.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{color}" opacity="0.9"/>')
+                parts.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{color}" opacity="{opacity}"/>')
             i = j
     return "".join(parts)
 
@@ -395,14 +400,22 @@ with col_legend:
     if not st.session_state.lines:
         st.caption("Henüz çizgi eklenmedi.")
     for line in list(st.session_state.lines):
-        c1, c2 = st.columns([3, 1])
+        is_visible = line.get("visible", True)
+        c1, c2, c3 = st.columns([3, 1, 1])
         with c1:
+            opacity = "1" if is_visible else "0.35"
             st.markdown(
                 f'<span style="display:inline-block;width:12px;height:12px;'
-                f'background-color:{line["color"]};border-radius:2px;"></span> {line["name"]}',
+                f'background-color:{line["color"]};border-radius:2px;opacity:{opacity};"></span> '
+                f'<span style="opacity:{opacity};">{line["name"]}</span>',
                 unsafe_allow_html=True,
             )
         with c2:
+            toggle_label = "Göster" if not is_visible else "Gizle"
+            if st.button(toggle_label, key=f"toggle_{line['id']}"):
+                line["visible"] = not is_visible
+                st.rerun()
+        with c3:
             if st.button("Kaldır", key=f"remove_{line['id']}"):
                 st.session_state.lines = [l for l in st.session_state.lines if l["id"] != line["id"]]
                 st.rerun()
@@ -427,7 +440,7 @@ if add_clicked:
             st.session_state.next_line_id += 1
 
             st.session_state.lines.append({
-                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
+                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
             })
             st.session_state.canvas_version += 1
             st.rerun()
@@ -452,7 +465,7 @@ if horiz_clicked:
             st.session_state.next_line_id += 1
 
             st.session_state.lines.append({
-                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
+                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
             })
             st.session_state.canvas_version += 1
             st.rerun()
@@ -497,7 +510,7 @@ if finish_clicked:
     st.session_state.next_line_id += 1
 
     st.session_state.lines.append({
-        "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
+        "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
     })
     st.session_state.polyline_points = []
     st.session_state.canvas_version += 1
@@ -543,9 +556,10 @@ def build_ohlcv(flow, volume, base_price, wick_strength, y_max):
 
 
 try:
-    if st.session_state.lines:
+    visible_lines = [l for l in st.session_state.lines if l.get("visible", True)]
+    if visible_lines:
         n = st.session_state.total_bars
-        stacked = np.stack([l["values"] for l in st.session_state.lines])
+        stacked = np.stack([l["values"] for l in visible_lines])
         covered = ~np.all(np.isnan(stacked), axis=0)
         flow_total = np.nansum(stacked, axis=0)
         volume = np.nansum(np.abs(stacked), axis=0)
