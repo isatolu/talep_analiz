@@ -45,6 +45,8 @@ defaults = {
     "canvas_version": 0,
     "next_line_id": 1,
     "polyline_points": [],   # kırık çizgi modunda biriken (bar, değer) noktaları
+    "calib_top_row": None,      # kalibrasyon: tuvalin GERÇEK üst kenarının ölçülen piksel satırı
+    "calib_bottom_row": None,   # kalibrasyon: tuvalin GERÇEK alt kenarının ölçülen piksel satırı
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -231,65 +233,76 @@ def hex_to_rgb(hex_color):
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def debug_stats(image_data, target_color_hex, y_max, tol=45):
-    """Geçici teşhis: ham piksel ölçümlerini döndürür - gerçek tarayıcıdaki
-    olası kayma/ölçek sorununu kör tahmin etmeden teşhis edebilmek için."""
-    if image_data is None:
-        return None
+def get_matched_rows_cols(image_data, target_color_hex, tol=45):
+    """Verilen renge en yakın piksellerin (satır, sütun) indekslerini döndürür."""
     arr = np.array(image_data)[:, :, :3].astype(int)
-    actual_h, actual_w = arr.shape[0], arr.shape[1]
     target = np.array(hex_to_rgb(target_color_hex))
     dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
     drawn_mask = dist < tol
     rows, cols = np.where(drawn_mask)
+    return rows, cols, arr.shape[0], arr.shape[1]
+
+
+def calibrated_center_half(actual_h):
+    """Kalibrasyon yapılmışsa ÖLÇÜLMÜŞ merkez/yarı-yükseklik değerlerini kullan.
+    Yapılmamışsa (tahmini) actual_h/2'ye geri düş - ama artık varsayılan olarak
+    kullanıcıyı kalibrasyona yönlendiriyoruz, bu sadece güvenlik ağı."""
+    top = st.session_state.get("calib_top_row")
+    bottom = st.session_state.get("calib_bottom_row")
+    if top is not None and bottom is not None and bottom > top:
+        center = (top + bottom) / 2
+        half = (bottom - top) / 2
+        return center, half
+    return actual_h / 2, actual_h / 2
+
+
+def row_to_value(row, y_max, actual_h):
+    center, half = calibrated_center_half(actual_h)
+    return ((center - row) / half) * y_max
+
+
+def debug_stats(image_data, target_color_hex, y_max, tol=45):
+    """Geçici teşhis: ham piksel ölçümlerini döndürür."""
+    if image_data is None:
+        return None
+    rows, cols, actual_h, actual_w = get_matched_rows_cols(image_data, target_color_hex, tol)
+    center, half = calibrated_center_half(actual_h)
     if len(rows) == 0:
-        return {"actual_h": actual_h, "actual_w": actual_w, "n_matched": 0}
+        return {"actual_h": actual_h, "actual_w": actual_w, "n_matched": 0,
+                "kalibre_merkez": round(center, 2), "kalibre_yari_yukseklik": round(half, 2)}
     row_mean = rows.mean()
-    value = ((actual_h / 2 - row_mean) / (actual_h / 2)) * y_max
+    value = row_to_value(row_mean, y_max, actual_h)
     return {
         "actual_h": actual_h, "actual_w": actual_w, "n_matched": int(len(rows)),
         "row_min": int(rows.min()), "row_max": int(rows.max()), "row_mean": round(float(row_mean), 2),
+        "kalibre_merkez": round(center, 2), "kalibre_yari_yukseklik": round(half, 2),
         "computed_value": round(float(value), 3),
     }
 
 
 def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
-    arr = np.array(image_data)[:, :, :3].astype(int)
-    # Gerçek görüntü boyutunu ölç - tarayıcı canvas'ı farklı bir piksel
-    # yoğunluğunda (ör. HiDPI/retina ekranlarda 2x) render etmiş olabilir,
-    # bu durumda sabit CANVAS_HEIGHT/bar_px varsayımı YANLIŞ sonuç verir.
-    actual_h, actual_w = arr.shape[0], arr.shape[1]
+    rows_all, cols_all, actual_h, actual_w = get_matched_rows_cols(image_data, target_color_hex, tol)
     bar_px_actual = actual_w / window_size
-
-    target = np.array(hex_to_rgb(target_color_hex))
-    dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
-    drawn_mask = dist < tol
 
     values = np.full(window_size, np.nan)
     for j in range(window_size):
         x0 = int(round(j * bar_px_actual))
         x1 = max(x0 + 1, int(round((j + 1) * bar_px_actual)))
-        rows, _ = np.where(drawn_mask[:, x0:x1])
-        if len(rows) > 0:
-            y_mean = rows.mean()
-            values[j] = ((actual_h / 2 - y_mean) / (actual_h / 2)) * y_max
+        mask = (cols_all >= x0) & (cols_all < x1)
+        if mask.any():
+            y_mean = rows_all[mask].mean()
+            values[j] = row_to_value(y_mean, y_max, actual_h)
     return values
 
 
 def extract_single_point(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
     """Kısa bir dokunuşun (dab) TEK bir (bar, değer) noktasına özetlenmesi - kırık çizgi aracı için."""
-    arr = np.array(image_data)[:, :, :3].astype(int)
-    actual_h, actual_w = arr.shape[0], arr.shape[1]
+    rows, cols, actual_h, actual_w = get_matched_rows_cols(image_data, target_color_hex, tol)
     bar_px_actual = actual_w / window_size
-
-    target = np.array(hex_to_rgb(target_color_hex))
-    dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
-    drawn_mask = dist < tol
-    rows, cols = np.where(drawn_mask)
     if len(rows) == 0:
         return None
     bar = cols.mean() / bar_px_actual
-    value = ((actual_h / 2 - rows.mean()) / (actual_h / 2)) * y_max
+    value = row_to_value(rows.mean(), y_max, actual_h)
     return bar, value
 
 
@@ -348,6 +361,30 @@ bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
     )
 
 canvas_width = CANVAS_WIDTH
+
+is_calibrated = st.session_state.calib_top_row is not None and st.session_state.calib_bottom_row is not None
+if is_calibrated:
+    st.success(
+        f"🎯 Kalibrasyon tamam (üst satır={st.session_state.calib_top_row:.1f}, "
+        f"alt satır={st.session_state.calib_bottom_row:.1f}). Ölçümler artık tahmine değil, bu ölçüme dayanıyor.",
+        icon="✅",
+    )
+else:
+    st.warning(
+        "⚠️ Henüz kalibre edilmedi — değerler geçici olarak tahminle hesaplanıyor, hafif kayma olabilir. "
+        "Aşağıyı aç ve bir kerelik kalibrasyonu yap.",
+        icon="⚠️",
+    )
+calib_expander = st.expander("🎯 Kalibrasyon (bir kere yap, kalıcı olur)", expanded=not is_calibrated)
+with calib_expander:
+    st.markdown(
+        """
+        1. Aşağıdaki tuvale, **en üstteki yatay gridline** üzerine (canvas'ın tam üst kenarı) kısa bir iz bırak, sonra **"① Üst Kenarı Kaydet"**'e bas.
+        2. Sonra **en alttaki yatay gridline** üzerine (canvas'ın tam alt kenarı) kısa bir iz bırak, **"② Alt Kenarı Kaydet"**'e bas.
+        3. İkisi de kaydedilince kalibrasyon tamamlanır ve tüm ölçümler buna göre yapılır — tahmin/kayma kalmaz.
+        """
+    )
+
 tool = st.radio(
     "Çizim aracı", ["Serbest çizim", "Yatay çizgi", "Kırık çizgi (nokta nokta)"],
     horizontal=True, key="tool_select",
@@ -388,6 +425,40 @@ with col_canvas:
     st.markdown(bar_axis_html(window_size, window_start, canvas_width, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
 
+    with calib_expander:
+        cb1, cb2, cb3 = st.columns(3)
+        with cb1:
+            calib_top_clicked = st.button("① Üst Kenarı Kaydet", use_container_width=True)
+        with cb2:
+            calib_bottom_clicked = st.button("② Alt Kenarı Kaydet", use_container_width=True)
+        with cb3:
+            calib_reset_clicked = st.button("Kalibrasyonu Sıfırla", use_container_width=True)
+
+        if calib_top_clicked:
+            rows, _, actual_h, _ = get_matched_rows_cols(canvas_result.image_data, active_color) \
+                if canvas_result.image_data is not None else (np.array([]), None, None, None)
+            if len(rows) == 0:
+                st.warning("Bu renkte bir iz bulunamadı, tekrar dener misin?")
+            else:
+                st.session_state.calib_top_row = float(rows.mean())
+                st.session_state.canvas_version += 1
+                st.rerun()
+
+        if calib_bottom_clicked:
+            rows, _, actual_h, _ = get_matched_rows_cols(canvas_result.image_data, active_color) \
+                if canvas_result.image_data is not None else (np.array([]), None, None, None)
+            if len(rows) == 0:
+                st.warning("Bu renkte bir iz bulunamadı, tekrar dener misin?")
+            else:
+                st.session_state.calib_bottom_row = float(rows.mean())
+                st.session_state.canvas_version += 1
+                st.rerun()
+
+        if calib_reset_clicked:
+            st.session_state.calib_top_row = None
+            st.session_state.calib_bottom_row = None
+            st.rerun()
+
     with st.expander("🔧 Teşhis bilgisi (geçici, hata ayıklamak için)", expanded=False):
         stats = debug_stats(canvas_result.image_data, active_color, y_max)
         if stats is None:
@@ -396,11 +467,6 @@ with col_canvas:
             st.caption(f"Bu renkte piksel bulunamadı. Görüntü boyutu: {stats['actual_h']}×{stats['actual_w']}")
         else:
             st.json(stats)
-            st.caption(
-                f"Beklenen: row_mean ≈ actual_h/2 = {stats['actual_h']/2:.1f} olduğunda değer 0 çıkmalı. "
-                f"Sıfır çizgisinde çizip buradaki 'computed_value' 0'dan belirgin farklıysa, "
-                f"row_mean'in actual_h/2'den ne kadar saptığını (fark) bana söyle."
-            )
 
     if tool == "Serbest çizim":
         add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
