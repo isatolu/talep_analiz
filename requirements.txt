@@ -1,6 +1,4 @@
-streamlit>=1.30
-streamlit-drawable-canvas-fix
+streamlit>=1.60
 numpy
 pandas
 plotly
-pillow

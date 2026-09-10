@@ -1,20 +1,22 @@
 """
-Net Talep Farkı ile Sentetik Grafik Oluşturucu - Aşama 1 (v2)
+Net Talep Farkı ile Sentetik Grafik Oluşturucu - Aşama 1 (v3)
 ----------------------------------------------------------------
-v1'e göre değişenler:
-  - Çizim alanı büyütüldü
-  - Sıfır çizgisi / değer ekseni artık canvas'ın kendi arka plan resmine
-    bağımlı değil; yan tarafta garanti şekilde HTML/CSS ile gösteriliyor
-    (bazı tarayıcı/versiyon kombinasyonlarında canvas'ın background_image
-    özelliği görünmeyebiliyor, bu yüzden ayrı ve güvenilir bir gösterim ekledik)
-  - Varsayılan toplam bar sayısı 500'e çıkarıldı
-  - ADD / REMOVE sonrası grafik artık otomatik güncelleniyor, GRAPH butonuna
-    basmaya gerek yok
-  - Çizgi kapsamayan (veri olmayan) bölgeler grafikte gölgeli gösteriliyor
-  - Beklenmeyen hatalar artık sayfayı tamamen çökertmiyor, okunabilir bir
-    mesaj gösteriliyor
+v2'ye göre KÖKLÜ değişiklik:
+  Önceki sürümlerde grid'i (ve eklenmiş çizgileri) ayrı bir HTML/CSS
+  katmanı olarak üçüncü parti bir canvas bileşeninin ÜSTÜNE bindirmeye
+  çalışıyorduk. Bu, iki ayrı DOM elemanının pixel-perfect hizalanmasını
+  gerektiriyordu ve bu hizalama tekrar tekrar bozuluyordu (Streamlit'in
+  elemanlar arası boşluğu tahmin edilemiyor).
+
+  Şimdi bunun yerine Streamlit'in "Custom Components v2" özelliğiyle
+  KENDİ canvas bileşenimizi yazdık: grid, eklenmiş çizgiler VE fare ile
+  çizim, hepsi TEK BİR <canvas> elemanına, TEK BİR JavaScript koduyla
+  çiziliyor. İki ayrı eleman olmadığı için hizalama sorunu yapısal
+  olarak imkansız hale geldi. Ayrıca artık üçüncü parti
+  streamlit-drawable-canvas kütüphanesine hiç ihtiyacımız yok.
 """
 
+import math
 import traceback
 
 import numpy as np
@@ -22,12 +24,11 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from streamlit_drawable_canvas import st_canvas
 
 # ----------------------------------------------------------------------
 # Sabitler
 # ----------------------------------------------------------------------
-CANVAS_WIDTH = 1400     # sabit çizim/grafik genişliği (px) - artık genişlemiyor
+CANVAS_WIDTH = 1400
 CANVAS_HEIGHT = 420
 LINE_PALETTE = [
     "#2563eb", "#f97316", "#16a34a", "#dc2626", "#9333ea",
@@ -42,13 +43,8 @@ st.set_page_config(page_title="Net Talep Farkı Simülatörü", layout="wide")
 defaults = {
     "total_bars": 150,
     "lines": [],
-    "canvas_version": 0,
     "next_line_id": 1,
     "polyline_points": [],   # kırık çizgi modunda biriken (bar, değer) noktaları
-    "calib_top_row": None,      # kalibrasyon: tuvalin GERÇEK üst kenarının ölçülen piksel satırı
-    "calib_bottom_row": None,   # kalibrasyon: tuvalin GERÇEK alt kenarının ölçülen piksel satırı
-    "calib_actual_h": None,     # kalibrasyon anındaki gerçek görüntü yüksekliği (ölçek dönüşümü için)
-    "overlay_y_offset": 0,      # overlay'i canvas'a tam oturtmak için elle ayarlanan piksel kayması
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -70,10 +66,6 @@ def resize_lines(new_total):
             line["values"] = vals[:new_total]
 
 
-def clamp(value, lo, hi):
-    return max(lo, min(value, hi))
-
-
 # ----------------------------------------------------------------------
 # Kenar çubuğu
 # ----------------------------------------------------------------------
@@ -89,8 +81,6 @@ with st.sidebar:
         st.session_state.total_bars = new_total_bars
 
     total_bars = st.session_state.total_bars
-    window_size = total_bars   # artık kaydırma yok, pencere = toplam
-    window_start = 0
     bar_px = CANVAS_WIDTH / total_bars
     st.caption(f"Bar başına ~{bar_px:.1f}px. Bar sayısı arttıkça çizim hassasiyeti düşer.")
 
@@ -103,243 +93,18 @@ with st.sidebar:
     st.markdown("---")
     if st.button("🗑 Tüm çizgileri temizle"):
         st.session_state.lines = []
-        st.session_state.canvas_version += 1
         st.rerun()
 
 
 # ----------------------------------------------------------------------
-# Grid overlay - CANVAS BİLEŞENİNİN KENDİ ARKA PLAN ÖZELLİĞİNE GÜVENMİYORUZ
-# (bazı Streamlit sürümlerinde background_color/background_image çalışmıyor).
-# Bunun yerine, canvas'ın TAM ÜSTÜNE, mouse olaylarını engellemeyen
-# (pointer-events:none) saf bir HTML/CSS katmanı bindiriyoruz. Bu katman
-# component'in içine değil, Streamlit sayfasının kendi DOM'una render
-# olduğu için component'in versiyon uyumluluğundan bağımsız, garanti çalışır.
+# Yan eksen etiketleri (basit, güvenilir - canvas'tan bağımsız bir sütunda)
 # ----------------------------------------------------------------------
-ZERO_LINE_COLOR = "#f59e0b"  # amber - net farklı, dikkat çekici
-
-
-def bar_to_x(bar, bar_px):
-    return (bar + 0.5) * bar_px
-
-
-def value_to_y(value, y_max, canvas_height):
-    center, half = css_center_half(canvas_height)
-    return center - (value / y_max) * half
-
-
-def committed_lines_svg(lines, bar_px, y_max, canvas_height):
-    """Eklenmiş tüm çizgileri, kendi verimizden (piksel tahminine gerek kalmadan) SVG olarak çiz.
-    Gizlenmiş çizgiler soluk ve kesik kesik gösterilir."""
-    parts = []
-    for line in lines:
-        vals = line["values"]
-        color = line["color"]
-        visible = line.get("visible", True)
-        stroke_width = "2.5" if visible else "1.5"
-        opacity = "0.9" if visible else "0.35"
-        dash = "" if visible else ' stroke-dasharray="5,4"'
-        n = len(vals)
-        i = 0
-        while i < n:
-            if np.isnan(vals[i]):
-                i += 1
-                continue
-            j = i
-            pts = []
-            while j < n and not np.isnan(vals[j]):
-                x = bar_to_x(j, bar_px)
-                y = value_to_y(vals[j], y_max, canvas_height)
-                pts.append(f"{x:.1f},{y:.1f}")
-                j += 1
-            if len(pts) >= 2:
-                parts.append(
-                    f'<polyline points="{" ".join(pts)}" fill="none" '
-                    f'stroke="{color}" stroke-width="{stroke_width}" opacity="{opacity}"{dash}/>'
-                )
-            elif len(pts) == 1:
-                x, y = pts[0].split(",")
-                parts.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{color}" opacity="{opacity}"/>')
-            i = j
-    return "".join(parts)
-
-
-def polyline_preview_svg(points, bar_px, y_max, canvas_height, color):
-    """Kırık çizgi modunda henüz eklenmemiş, birikmekte olan noktaları göster."""
-    if not points:
-        return ""
-    parts = []
-    pts_px = [(bar_to_x(b, bar_px), value_to_y(v, y_max, canvas_height)) for b, v in points]
-    if len(pts_px) >= 2:
-        pts_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts_px)
-        parts.append(
-            f'<polyline points="{pts_str}" fill="none" stroke="{color}" '
-            f'stroke-width="2" stroke-dasharray="6,4" opacity="0.9"/>'
-        )
-    for idx, (x, y) in enumerate(pts_px):
-        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="white" stroke="{color}" stroke-width="2"/>')
-        parts.append(f'<text x="{x + 8:.1f}" y="{y - 8:.1f}" font-size="11" fill="{color}">{idx + 1}</text>')
-    return "".join(parts)
-
-
-def css_center_half(canvas_height):
-    """Kalibrasyon varsa, CSS piksel uzayına ÖLÇEKLENMİŞ merkez/yarı-yükseklik döndürür.
-    Böylece grid çizgileri de gerçek ölçümle birebir tutarlı olur."""
-    top = st.session_state.get("calib_top_row")
-    bottom = st.session_state.get("calib_bottom_row")
-    calib_h = st.session_state.get("calib_actual_h")
-    if top is not None and bottom is not None and calib_h and bottom > top:
-        scale = canvas_height / calib_h
-        css_top = top * scale
-        css_bottom = bottom * scale
-        return (css_top + css_bottom) / 2, (css_bottom - css_top) / 2
-    return canvas_height / 2, canvas_height / 2
-
-
-def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px, y_max,
-                       lines=None, polyline_points=None, preview_color="#000000", preview_value=None):
-    parts = []
-    center, half = css_center_half(canvas_height)
-    # dikey gridler (bar bazlı)
-    step = max(1, window_size // 20)
-    for j in range(0, window_size + 1, step):
-        bar_idx = window_start + j
-        left = j * bar_px
-        strong = bar_idx % (step * 4) == 0
-        color = "rgba(0,0,0,0.35)" if strong else "rgba(0,0,0,0.15)"
-        parts.append(
-            f'<div style="position:absolute; left:{left:.1f}px; top:0; width:1px; '
-            f'height:{canvas_height}px; background:{color};"></div>'
-        )
-    # yatay gridler (değer bazlı, y_max'ı 4 eşit dilime böl) - kalibre edilmiş merkez/yarı-yükseklik ile
-    for k in range(-4, 5):
-        y_val = y_max * k / 4
-        top = center - (y_val / y_max) * half
-        if k == 0:
-            continue  # sıfır çizgisi ayrı, aşağıda daha belirgin çiziliyor
-        strong = k % 2 == 0
-        color = "rgba(0,0,0,0.30)" if strong else "rgba(0,0,0,0.14)"
-        parts.append(
-            f'<div style="position:absolute; left:0; top:{top:.1f}px; width:{canvas_width}px; '
-            f'height:1px; background:{color};"></div>'
-        )
-    parts.append(
-        f'<div style="position:absolute; left:0; top:{center - 1:.1f}px; width:{canvas_width}px; '
-        f'height:2px; background:{ZERO_LINE_COLOR}; box-shadow:0 0 3px {ZERO_LINE_COLOR};"></div>'
-    )
-    if preview_value is not None:
-        prev_top = center - (preview_value / y_max) * half
-        parts.append(
-            f'<div style="position:absolute; left:0; top:{prev_top:.1f}px; width:{canvas_width}px; '
-            f'height:2px; border-top:2px dashed {preview_color}; opacity:0.8;"></div>'
-        )
-
-    lines_svg = committed_lines_svg(lines or [], bar_px, y_max, canvas_height)
-    preview_svg = polyline_preview_svg(polyline_points or [], bar_px, y_max, canvas_height, preview_color)
-    svg_layer = (
-        f'<svg width="{canvas_width}" height="{canvas_height}" '
-        f'style="position:absolute; top:0; left:0;">{lines_svg}{preview_svg}</svg>'
-    )
-
-    manual_offset = st.session_state.get("overlay_y_offset", 0)
-    return f"""
-    <div style="position:relative; height:0; margin-bottom:{-6 + manual_offset}px;">
-      <div style="position:absolute; top:0; left:0; width:{canvas_width}px;
-                  height:{canvas_height}px; pointer-events:none; z-index:999; overflow:visible;">
-        {''.join(parts)}
-        {svg_layer}
-      </div>
-    </div>
-    """
-
-
-def hex_to_rgb(hex_color):
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-
-
-def get_matched_rows_cols(image_data, target_color_hex, tol=45):
-    """Verilen renge en yakın piksellerin (satır, sütun) indekslerini döndürür."""
-    arr = np.array(image_data)[:, :, :3].astype(int)
-    target = np.array(hex_to_rgb(target_color_hex))
-    dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
-    drawn_mask = dist < tol
-    rows, cols = np.where(drawn_mask)
-    return rows, cols, arr.shape[0], arr.shape[1]
-
-
-def calibrated_center_half(actual_h):
-    """Kalibrasyon yapılmışsa ÖLÇÜLMÜŞ merkez/yarı-yükseklik değerlerini kullan.
-    Yapılmamışsa (tahmini) actual_h/2'ye geri düş - ama artık varsayılan olarak
-    kullanıcıyı kalibrasyona yönlendiriyoruz, bu sadece güvenlik ağı."""
-    top = st.session_state.get("calib_top_row")
-    bottom = st.session_state.get("calib_bottom_row")
-    if top is not None and bottom is not None and bottom > top:
-        center = (top + bottom) / 2
-        half = (bottom - top) / 2
-        return center, half
-    return actual_h / 2, actual_h / 2
-
-
-def row_to_value(row, y_max, actual_h):
-    center, half = calibrated_center_half(actual_h)
-    return ((center - row) / half) * y_max
-
-
-def debug_stats(image_data, target_color_hex, y_max, tol=45):
-    """Geçici teşhis: ham piksel ölçümlerini döndürür."""
-    if image_data is None:
-        return None
-    rows, cols, actual_h, actual_w = get_matched_rows_cols(image_data, target_color_hex, tol)
-    center, half = calibrated_center_half(actual_h)
-    if len(rows) == 0:
-        return {"actual_h": actual_h, "actual_w": actual_w, "n_matched": 0,
-                "kalibre_merkez": round(center, 2), "kalibre_yari_yukseklik": round(half, 2)}
-    row_mean = rows.mean()
-    value = row_to_value(row_mean, y_max, actual_h)
-    return {
-        "actual_h": actual_h, "actual_w": actual_w, "n_matched": int(len(rows)),
-        "row_min": int(rows.min()), "row_max": int(rows.max()), "row_mean": round(float(row_mean), 2),
-        "kalibre_merkez": round(center, 2), "kalibre_yari_yukseklik": round(half, 2),
-        "computed_value": round(float(value), 3),
-    }
-
-
-def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
-    rows_all, cols_all, actual_h, actual_w = get_matched_rows_cols(image_data, target_color_hex, tol)
-    bar_px_actual = actual_w / window_size
-
-    values = np.full(window_size, np.nan)
-    for j in range(window_size):
-        x0 = int(round(j * bar_px_actual))
-        x1 = max(x0 + 1, int(round((j + 1) * bar_px_actual)))
-        mask = (cols_all >= x0) & (cols_all < x1)
-        if mask.any():
-            y_mean = rows_all[mask].mean()
-            values[j] = row_to_value(y_mean, y_max, actual_h)
-    return values
-
-
-def extract_single_point(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
-    """Kısa bir dokunuşun (dab) TEK bir (bar, değer) noktasına özetlenmesi - kırık çizgi aracı için."""
-    rows, cols, actual_h, actual_w = get_matched_rows_cols(image_data, target_color_hex, tol)
-    bar_px_actual = actual_w / window_size
-    if len(rows) == 0:
-        return None
-    bar = cols.mean() / bar_px_actual
-    value = row_to_value(rows.mean(), y_max, actual_h)
-    return bar, value
-
-
 def value_axis_html(canvas_height, y_max, align="right"):
-    """Canvas'ın yanına, grid çizgileriyle BİREBİR AYNI matematiği (aynı kalibre
-    merkez/yarı-yükseklik) kullanarak, mutlak piksel konumunda değer etiketleri.
-    Önceki flexbox tabanlı versiyon gridle tutarsızdı - bu artık garanti tutarlı."""
-    center, half = css_center_half(canvas_height)
     ticks = [y_max, y_max / 2, 0, -y_max / 2, -y_max]
     side = "right" if align == "right" else "left"
     items = []
     for t in ticks:
-        top = center - (t / y_max) * half
+        top = canvas_height / 2 - (t / y_max) * (canvas_height / 2)
         items.append(
             f'<div style="position:absolute; top:{top - 7:.1f}px; {side}:4px; '
             f'font-size:11px; color:#9ca3af;">{t:g}</div>'
@@ -347,16 +112,209 @@ def value_axis_html(canvas_height, y_max, align="right"):
     return f'<div style="position:relative; height:{canvas_height}px;">{"".join(items)}</div>'
 
 
-def bar_axis_html(window_size, window_start, canvas_width, bar_px):
+def bar_axis_html(window_size, canvas_width, bar_px):
     step = max(1, window_size // 10)
     spans = []
     for j in range(0, window_size, step):
         left_px = j * bar_px
         spans.append(
             f'<span style="position:absolute; left:{left_px:.1f}px; '
-            f'font-size:11px; color:#9ca3af;">{window_start + j}</span>'
+            f'font-size:11px; color:#9ca3af;">{j}</span>'
         )
     return f'<div style="position:relative; height:16px; width:{canvas_width}px;">{"".join(spans)}</div>'
+
+
+# ----------------------------------------------------------------------
+# Özel canvas bileşeni - grid + eklenmiş çizgiler + önizleme + serbest çizim
+# hepsi TEK canvas elemanında, TEK JS kodunda (Custom Components v2)
+# ----------------------------------------------------------------------
+_CANVAS_HTML = '<canvas id="dc"></canvas>'
+_CANVAS_CSS = """
+canvas { display:block; cursor:crosshair; touch-action:none; background:#ffffff; }
+"""
+_CANVAS_JS = r"""
+export default function(component) {
+    const { data, parentElement, setTriggerValue } = component;
+
+    const oldCanvas = parentElement.querySelector("#dc");
+    const canvas = oldCanvas.cloneNode(true);
+    oldCanvas.replaceWith(canvas);
+    const ctx = canvas.getContext("2d");
+
+    const W = data.canvas_width;
+    const H = data.canvas_height;
+    const yMax = data.y_max;
+    const barPx = data.bar_px;
+    const windowSize = data.window_size;
+    const lines = data.lines || [];
+    const activeColor = data.active_color || "#1f2937";
+    const previewType = data.preview_type || "none";
+    const previewValue = data.preview_value;
+    const previewPoints = data.preview_points || [];
+
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+
+    function valueToY(v) { return H / 2 - (v / yMax) * (H / 2); }
+    function yToValue(y) { return ((H / 2 - y) / (H / 2)) * yMax; }
+    function barToX(b) { return (b + 0.5) * barPx; }
+
+    function drawGrid() {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, W, H);
+        const step = Math.max(1, Math.floor(windowSize / 20));
+        for (let j = 0; j <= windowSize; j += step) {
+            const x = j * barPx;
+            const strong = (j % (step * 4)) === 0;
+            ctx.strokeStyle = strong ? "rgba(0,0,0,0.35)" : "rgba(0,0,0,0.15)";
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        }
+        for (let k = -4; k <= 4; k++) {
+            if (k === 0) continue;
+            const y = valueToY(yMax * k / 4);
+            const strong = (k % 2 === 0);
+            ctx.strokeStyle = strong ? "rgba(0,0,0,0.30)" : "rgba(0,0,0,0.14)";
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 2;
+        const yz = valueToY(0);
+        ctx.beginPath(); ctx.moveTo(0, yz); ctx.lineTo(W, yz); ctx.stroke();
+    }
+
+    function drawLines() {
+        lines.forEach(line => {
+            const vals = line.values;
+            const vis = line.visible !== false;
+            ctx.strokeStyle = line.color;
+            ctx.lineWidth = vis ? 2.5 : 1.5;
+            ctx.globalAlpha = vis ? 0.9 : 0.35;
+            ctx.setLineDash(vis ? [] : [5, 4]);
+            let drawing = false;
+            ctx.beginPath();
+            for (let j = 0; j < vals.length; j++) {
+                const v = vals[j];
+                if (v === null || v === undefined) { drawing = false; continue; }
+                const x = barToX(j), y = valueToY(v);
+                if (!drawing) { ctx.moveTo(x, y); drawing = true; } else { ctx.lineTo(x, y); }
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+        });
+    }
+
+    function drawPreview() {
+        if (previewType === "horizontal" && previewValue !== null && previewValue !== undefined) {
+            const y = valueToY(previewValue);
+            ctx.strokeStyle = activeColor;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+            ctx.setLineDash([]);
+        } else if (previewType === "points" && previewPoints.length > 0) {
+            const pts = previewPoints.map(p => ({ x: barToX(p.bar), y: valueToY(p.value) }));
+            if (pts.length >= 2) {
+                ctx.strokeStyle = activeColor;
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 4]);
+                ctx.beginPath();
+                pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            pts.forEach((p, i) => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+                ctx.fillStyle = "#ffffff";
+                ctx.fill();
+                ctx.strokeStyle = activeColor;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.fillStyle = activeColor;
+                ctx.font = "11px sans-serif";
+                ctx.fillText(String(i + 1), p.x + 7, p.y - 7);
+            });
+        }
+    }
+
+    function redraw() {
+        drawGrid();
+        drawLines();
+        drawPreview();
+    }
+    redraw();
+
+    let drawingPoints = null;
+
+    function getPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (W / rect.width);
+        const y = (e.clientY - rect.top) * (H / rect.height);
+        return { x, y };
+    }
+
+    function onDown(e) {
+        drawingPoints = [getPos(e)];
+    }
+    function onMove(e) {
+        if (!drawingPoints) return;
+        drawingPoints.push(getPos(e));
+        redraw();
+        ctx.strokeStyle = activeColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        drawingPoints.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+        ctx.stroke();
+    }
+    function finishStroke() {
+        if (!drawingPoints || drawingPoints.length < 2) { drawingPoints = null; return; }
+        const pts = drawingPoints.map(p => ({ bar: p.x / barPx, value: yToValue(p.y) }));
+        setTriggerValue("stroke_done", pts);
+        drawingPoints = null;
+    }
+    function onUp() { finishStroke(); }
+    function onLeave() { if (drawingPoints) finishStroke(); }
+
+    canvas.addEventListener("mousedown", onDown);
+    canvas.addEventListener("mousemove", onMove);
+    canvas.addEventListener("mouseup", onUp);
+    canvas.addEventListener("mouseleave", onLeave);
+
+    return () => {
+        canvas.removeEventListener("mousedown", onDown);
+        canvas.removeEventListener("mousemove", onMove);
+        canvas.removeEventListener("mouseup", onUp);
+        canvas.removeEventListener("mouseleave", onLeave);
+    };
+}
+"""
+
+draw_canvas = st.components.v2.component(
+    name="net_talep_draw_canvas",
+    html=_CANVAS_HTML,
+    css=_CANVAS_CSS,
+    js=_CANVAS_JS,
+)
+
+
+def build_lines_payload():
+    payload = []
+    for line in st.session_state.lines:
+        vals = line["values"]
+        payload.append({
+            "color": line["color"],
+            "visible": bool(line.get("visible", True)),
+            "values": [
+                None if (v is None or (isinstance(v, float) and math.isnan(v))) else round(float(v), 4)
+                for v in vals
+            ],
+        })
+    return payload
 
 
 # ----------------------------------------------------------------------
@@ -374,52 +332,12 @@ with st.expander("Nasıl kullanılır?", expanded=False):
   görürsün), "Ekle" de — %100 kesin, fareye hiç gerek yok.
 - **Kırık çizgi (nokta nokta):** her köşe için Bar/Değer kaydırıcılarını ayarla
   (canvas'ta o an nerede duracağını önizlersin), "Nokta Ekle" de. Noktalar
-  aralarında düz çizgilerle birleşir — kare/üçgen dalga gibi kesin köşeli
-  şekiller için ideal, yine %100 kesin. Bitirince "Çizgiyi Tamamla" ile ekle.
+  aralarında düz çizgilerle birleşir. Bitirince "Çizgiyi Tamamla" ile ekle.
 
-**Eklediğin tüm çizgiler, tuvalin üzerinde kendi renkleriyle kalıcı olarak
-çizili kalır** (gerçek veriden, piksel tahmini değil) — böylece çizim
-ekranı ile sonuç grafiğini yan yana karşılaştırabilirsin. Bir çizgiyi
-Kaldır'a bastığında bu çizim de kaybolur.
-
-Tüm bar'lar tek seferde, sabit genişlikte gösterilir. Bar sayısını artırırsan
-bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
+Eklediğin tüm çizgiler, canvas'ın üzerinde kendi renkleriyle kalıcı olarak
+çizili kalır — grid ve çizimler artık AYNI canvas elemanına, aynı kodla
+çiziliyor, bu yüzden hizalama sorunu yapısal olarak mümkün değil.
         """
-    )
-
-canvas_width = CANVAS_WIDTH
-
-is_calibrated = st.session_state.calib_top_row is not None and st.session_state.calib_bottom_row is not None
-if is_calibrated:
-    st.success(
-        f"🎯 Kalibrasyon tamam (üst satır={st.session_state.calib_top_row:.1f}, "
-        f"alt satır={st.session_state.calib_bottom_row:.1f}). Ölçümler artık tahmine değil, bu ölçüme dayanıyor.",
-        icon="✅",
-    )
-else:
-    st.warning(
-        "⚠️ Henüz kalibre edilmedi — değerler geçici olarak tahminle hesaplanıyor, hafif kayma olabilir. "
-        "Aşağıyı aç ve bir kerelik kalibrasyonu yap.",
-        icon="⚠️",
-    )
-calib_expander = st.expander("🎯 Kalibrasyon (bir kere yap, kalıcı olur)", expanded=not is_calibrated)
-with calib_expander:
-    st.markdown(
-        """
-        1. Aşağıdaki tuvale, **en üstteki yatay gridline** üzerine (canvas'ın tam üst kenarı) kısa bir iz bırak, sonra **"① Üst Kenarı Kaydet"**'e bas.
-        2. Sonra **en alttaki yatay gridline** üzerine (canvas'ın tam alt kenarı) kısa bir iz bırak, **"② Alt Kenarı Kaydet"**'e bas.
-        3. İkisi de kaydedilince kalibrasyon tamamlanır ve tüm ölçümler buna göre yapılır — tahmin/kayma kalmaz.
-        """
-    )
-    st.markdown("---")
-    st.markdown(
-        "**Overlay hizalama (elle, kesin ayar):** Grid/sıfır çizgisi canvas'ın gerçek "
-        "kenarlarıyla tam örtüşene kadar aşağıdaki kaydırıcıyla ayarla. Pozitif = aşağı kaydır, "
-        "negatif = yukarı kaydır. Bu, CSS'in tahmin edemediği boşluğu senin gözünle kesinleştirir."
-    )
-    st.session_state.overlay_y_offset = st.slider(
-        "Overlay dikey kayma (px)", min_value=-60, max_value=60,
-        value=st.session_state.overlay_y_offset, step=1, key="overlay_offset_slider",
     )
 
 tool = st.radio(
@@ -427,15 +345,20 @@ tool = st.radio(
     horizontal=True, key="tool_select",
 )
 
+preview_type = "none"
+preview_value = None
 horiz_value = 0.0
+point_bar, point_value = 0, 0.0
+
 if tool == "Yatay çizgi":
     horiz_value = st.slider(
         "Yatay çizginin değeri (canvas'ta kesikli önizlemesini göreceksin)",
         min_value=-float(y_max), max_value=float(y_max), value=0.0, step=0.1, key="horiz_value_slider",
     )
+    preview_type = "horizontal"
+    preview_value = float(horiz_value)
 
-point_bar, point_value = 0, 0.0
-if tool == "Kırık çizgi (nokta nokta)":
+elif tool == "Kırık çizgi (nokta nokta)":
     st.caption("Kesin köşe noktaları için fareye değil, sayıya güveniyoruz — önizlemesini canvas'ta göreceksin.")
     pc_a, pc_b = st.columns(2)
     with pc_a:
@@ -448,6 +371,7 @@ if tool == "Kırık çizgi (nokta nokta)":
             "Nokta - Değer", min_value=-float(y_max), max_value=float(y_max),
             value=0.0, step=0.1, key="point_value_slider",
         )
+    preview_type = "points"
 
 col_axis, col_canvas, col_axis_right, col_legend = st.columns([0.06, 0.74, 0.06, 0.14])
 
@@ -458,80 +382,33 @@ with col_axis_right:
     st.markdown(value_axis_html(CANVAS_HEIGHT, y_max, align="left"), unsafe_allow_html=True)
 
 with col_canvas:
-    canvas_key = f"canvas_{st.session_state.canvas_version}_{total_bars}"
     active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
-    st.markdown(
-        grid_overlay_html(
-            window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px, y_max,
-            lines=st.session_state.lines,
-            polyline_points=(
-                st.session_state.polyline_points + [(float(point_bar), float(point_value))]
-                if tool == "Kırık çizgi (nokta nokta)" else []
-            ),
-            preview_color=active_color,
-            preview_value=horiz_value if tool == "Yatay çizgi" else None,
-        ),
-        unsafe_allow_html=True,
-    )
-    canvas_result = st_canvas(
-        fill_color="rgba(255,255,255,0)",
-        stroke_width=2,
-        stroke_color=active_color,
-        background_color="#FFFFFF",
-        update_streamlit=True,
+    preview_points_payload = []
+    if preview_type == "points":
+        pts = st.session_state.polyline_points + [(float(point_bar), float(point_value))]
+        preview_points_payload = [{"bar": b, "value": v} for b, v in pts]
+
+    canvas_result = draw_canvas(
+        data={
+            "canvas_width": CANVAS_WIDTH,
+            "canvas_height": CANVAS_HEIGHT,
+            "window_size": total_bars,
+            "bar_px": bar_px,
+            "y_max": y_max,
+            "lines": build_lines_payload(),
+            "active_color": active_color,
+            "preview_type": preview_type,
+            "preview_value": preview_value,
+            "preview_points": preview_points_payload,
+        },
+        on_stroke_done_change=lambda: None,
+        key="draw_canvas_main",
+        width=CANVAS_WIDTH,
         height=CANVAS_HEIGHT,
-        width=canvas_width,
-        drawing_mode="freedraw",
-        key=canvas_key,
     )
-    st.markdown(bar_axis_html(window_size, window_start, canvas_width, bar_px), unsafe_allow_html=True)
+    st.markdown(bar_axis_html(total_bars, CANVAS_WIDTH, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
-
-    with calib_expander:
-        cb1, cb2, cb3 = st.columns(3)
-        with cb1:
-            calib_top_clicked = st.button("① Üst Kenarı Kaydet", use_container_width=True)
-        with cb2:
-            calib_bottom_clicked = st.button("② Alt Kenarı Kaydet", use_container_width=True)
-        with cb3:
-            calib_reset_clicked = st.button("Kalibrasyonu Sıfırla", use_container_width=True)
-
-        if calib_top_clicked:
-            rows, _, actual_h, _ = get_matched_rows_cols(canvas_result.image_data, active_color) \
-                if canvas_result.image_data is not None else (np.array([]), None, None, None)
-            if len(rows) == 0:
-                st.warning("Bu renkte bir iz bulunamadı, tekrar dener misin?")
-            else:
-                st.session_state.calib_top_row = float(rows.mean())
-                st.session_state.calib_actual_h = actual_h
-                st.session_state.canvas_version += 1
-                st.rerun()
-
-        if calib_bottom_clicked:
-            rows, _, actual_h, _ = get_matched_rows_cols(canvas_result.image_data, active_color) \
-                if canvas_result.image_data is not None else (np.array([]), None, None, None)
-            if len(rows) == 0:
-                st.warning("Bu renkte bir iz bulunamadı, tekrar dener misin?")
-            else:
-                st.session_state.calib_bottom_row = float(rows.mean())
-                st.session_state.calib_actual_h = actual_h
-                st.session_state.canvas_version += 1
-                st.rerun()
-
-        if calib_reset_clicked:
-            st.session_state.calib_top_row = None
-            st.session_state.calib_bottom_row = None
-            st.rerun()
-
-    with st.expander("🔧 Teşhis bilgisi (geçici, hata ayıklamak için)", expanded=False):
-        stats = debug_stats(canvas_result.image_data, active_color, y_max)
-        if stats is None:
-            st.caption("Henüz çizim yok.")
-        elif stats.get("n_matched", 0) == 0:
-            st.caption(f"Bu renkte piksel bulunamadı. Görüntü boyutu: {stats['actual_h']}×{stats['actual_w']}")
-        else:
-            st.json(stats)
 
     if tool == "Serbest çizim":
         add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
@@ -539,13 +416,11 @@ with col_canvas:
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
 
     elif tool == "Yatay çizgi":
-        st.caption("Kesin bir değer istediğin için fareye değil, doğrudan sayıya güveniyoruz — piksel hatası imkansız.")
         horiz_clicked = st.button("➕ Yatay Çizgiyi Ekle", use_container_width=True)
         add_clicked = False
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
 
     else:  # Kırık çizgi
-        st.caption("Yukarıdaki Bar/Değer kaydırıcılarıyla köşeyi seç, 'Nokta Ekle' de. Bitirince 'Çizgiyi Tamamla'.")
         pc1, pc2, pc3 = st.columns(3)
         with pc1:
             point_clicked = st.button("📍 Nokta Ekle", use_container_width=True)
@@ -588,28 +463,29 @@ with col_legend:
                 st.rerun()
 
 # ----------------------------------------------------------------------
-# ADD işlemi - Serbest çizim
+# ADD işlemi - Serbest çizim (canvas'tan gelen (bar, değer) noktalarından)
 # ----------------------------------------------------------------------
-if add_clicked:
-    if canvas_result.image_data is None:
-        st.warning("Önce tuvale bir çizgi çiz.")
-    else:
-        stroke_values = extract_stroke_values(
-            canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color, bar_px
-        )
-        if np.all(np.isnan(stroke_values)):
-            st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
-        else:
-            full_values = np.full(st.session_state.total_bars, np.nan)
-            full_values[window_start:window_start + window_size] = stroke_values
+if tool == "Serbest çizim" and canvas_result.stroke_done:
+    points = canvas_result.stroke_done
+    bars = np.array([p["bar"] for p in points])
+    vals = np.array([p["value"] for p in points])
 
+    stroke_values = np.full(total_bars, np.nan)
+    for j in range(total_bars):
+        mask = (bars >= j) & (bars < j + 1)
+        if mask.any():
+            stroke_values[j] = vals[mask].mean()
+
+    if add_clicked:
+        if np.all(np.isnan(stroke_values)):
+            st.warning("Çizim algılanamadı, tekrar dener misin?")
+        else:
             new_id = st.session_state.next_line_id
             st.session_state.next_line_id += 1
-
             st.session_state.lines.append({
-                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
+                "id": new_id, "name": f"Line {new_id}", "color": active_color,
+                "values": stroke_values, "visible": True,
             })
-            st.session_state.canvas_version += 1
             st.rerun()
 
 # ----------------------------------------------------------------------
@@ -617,14 +493,11 @@ if add_clicked:
 # ----------------------------------------------------------------------
 if horiz_clicked:
     full_values = np.full(st.session_state.total_bars, float(horiz_value))
-
     new_id = st.session_state.next_line_id
     st.session_state.next_line_id += 1
-
     st.session_state.lines.append({
         "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
     })
-    st.session_state.canvas_version += 1
     st.rerun()
 
 # ----------------------------------------------------------------------
@@ -640,7 +513,6 @@ if undo_clicked and st.session_state.polyline_points:
 
 if cancel_clicked:
     st.session_state.polyline_points = []
-    st.session_state.canvas_version += 1
     st.rerun()
 
 if finish_clicked:
@@ -657,12 +529,10 @@ if finish_clicked:
 
     new_id = st.session_state.next_line_id
     st.session_state.next_line_id += 1
-
     st.session_state.lines.append({
         "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
     })
     st.session_state.polyline_points = []
-    st.session_state.canvas_version += 1
     st.rerun()
 
 
@@ -681,9 +551,6 @@ def build_ohlcv(flow, volume, base_price, wick_strength, y_max):
 
     avg_vol = volume.mean() if volume.mean() > 0 else 1.0
 
-    # Fitil birimi artık Y ekseni (net talep aralığı) yerine FİYATIN KENDİ
-    # hareket ölçeğine göre belirleniyor - aksi halde fiyat büyük bir aralığa
-    # yayıldığında fitiller oransal olarak görünmez kalıyordu.
     body_sizes = np.abs(close - open_)
     avg_body = body_sizes.mean()
     if avg_body <= 0:
@@ -742,7 +609,6 @@ try:
                 row=2, col=1,
             )
 
-            # kapsanmayan bölgeleri gölgele (0-tabanlı bar indeksine göre)
             in_gap = False
             gap_start = None
             for i in range(n):
