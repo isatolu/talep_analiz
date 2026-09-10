@@ -47,6 +47,7 @@ defaults = {
     "polyline_points": [],   # kırık çizgi modunda biriken (bar, değer) noktaları
     "calib_top_row": None,      # kalibrasyon: tuvalin GERÇEK üst kenarının ölçülen piksel satırı
     "calib_bottom_row": None,   # kalibrasyon: tuvalin GERÇEK alt kenarının ölçülen piksel satırı
+    "calib_actual_h": None,     # kalibrasyon anındaki gerçek görüntü yüksekliği (ölçek dönüşümü için)
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -121,7 +122,8 @@ def bar_to_x(bar, bar_px):
 
 
 def value_to_y(value, y_max, canvas_height):
-    return canvas_height / 2 - (value / y_max) * (canvas_height / 2)
+    center, half = css_center_half(canvas_height)
+    return center - (value / y_max) * half
 
 
 def committed_lines_svg(lines, bar_px, y_max, canvas_height):
@@ -178,9 +180,24 @@ def polyline_preview_svg(points, bar_px, y_max, canvas_height, color):
     return "".join(parts)
 
 
+def css_center_half(canvas_height):
+    """Kalibrasyon varsa, CSS piksel uzayına ÖLÇEKLENMİŞ merkez/yarı-yükseklik döndürür.
+    Böylece grid çizgileri de gerçek ölçümle birebir tutarlı olur."""
+    top = st.session_state.get("calib_top_row")
+    bottom = st.session_state.get("calib_bottom_row")
+    calib_h = st.session_state.get("calib_actual_h")
+    if top is not None and bottom is not None and calib_h and bottom > top:
+        scale = canvas_height / calib_h
+        css_top = top * scale
+        css_bottom = bottom * scale
+        return (css_top + css_bottom) / 2, (css_bottom - css_top) / 2
+    return canvas_height / 2, canvas_height / 2
+
+
 def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px, y_max,
-                       lines=None, polyline_points=None, preview_color="#000000"):
+                       lines=None, polyline_points=None, preview_color="#000000", preview_value=None):
     parts = []
+    center, half = css_center_half(canvas_height)
     # dikey gridler (bar bazlı)
     step = max(1, window_size // 20)
     for j in range(0, window_size + 1, step):
@@ -192,10 +209,10 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
             f'<div style="position:absolute; left:{left:.1f}px; top:0; width:1px; '
             f'height:{canvas_height}px; background:{color};"></div>'
         )
-    # yatay gridler (değer bazlı, y_max'ı 4 eşit dilime böl)
+    # yatay gridler (değer bazlı, y_max'ı 4 eşit dilime böl) - kalibre edilmiş merkez/yarı-yükseklik ile
     for k in range(-4, 5):
         y_val = y_max * k / 4
-        top = canvas_height / 2 - (y_val / y_max) * (canvas_height / 2)
+        top = center - (y_val / y_max) * half
         if k == 0:
             continue  # sıfır çizgisi ayrı, aşağıda daha belirgin çiziliyor
         strong = k % 2 == 0
@@ -204,11 +221,16 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
             f'<div style="position:absolute; left:0; top:{top:.1f}px; width:{canvas_width}px; '
             f'height:1px; background:{color};"></div>'
         )
-    mid = canvas_height // 2
     parts.append(
-        f'<div style="position:absolute; left:0; top:{mid - 1}px; width:{canvas_width}px; '
+        f'<div style="position:absolute; left:0; top:{center - 1:.1f}px; width:{canvas_width}px; '
         f'height:2px; background:{ZERO_LINE_COLOR}; box-shadow:0 0 3px {ZERO_LINE_COLOR};"></div>'
     )
+    if preview_value is not None:
+        prev_top = center - (preview_value / y_max) * half
+        parts.append(
+            f'<div style="position:absolute; left:0; top:{prev_top:.1f}px; width:{canvas_width}px; '
+            f'height:2px; border-top:2px dashed {preview_color}; opacity:0.8;"></div>'
+        )
 
     lines_svg = committed_lines_svg(lines or [], bar_px, y_max, canvas_height)
     preview_svg = polyline_preview_svg(polyline_points or [], bar_px, y_max, canvas_height, preview_color)
@@ -390,6 +412,13 @@ tool = st.radio(
     horizontal=True, key="tool_select",
 )
 
+horiz_value = 0.0
+if tool == "Yatay çizgi":
+    horiz_value = st.slider(
+        "Yatay çizginin değeri (canvas'ta kesikli önizlemesini göreceksin)",
+        min_value=-float(y_max), max_value=float(y_max), value=0.0, step=0.1, key="horiz_value_slider",
+    )
+
 col_axis, col_canvas, col_axis_right, col_legend = st.columns([0.06, 0.74, 0.06, 0.14])
 
 with col_axis:
@@ -408,6 +437,7 @@ with col_canvas:
             lines=st.session_state.lines,
             polyline_points=st.session_state.polyline_points if tool == "Kırık çizgi (nokta nokta)" else [],
             preview_color=active_color,
+            preview_value=horiz_value if tool == "Yatay çizgi" else None,
         ),
         unsafe_allow_html=True,
     )
@@ -441,6 +471,7 @@ with col_canvas:
                 st.warning("Bu renkte bir iz bulunamadı, tekrar dener misin?")
             else:
                 st.session_state.calib_top_row = float(rows.mean())
+                st.session_state.calib_actual_h = actual_h
                 st.session_state.canvas_version += 1
                 st.rerun()
 
@@ -451,6 +482,7 @@ with col_canvas:
                 st.warning("Bu renkte bir iz bulunamadı, tekrar dener misin?")
             else:
                 st.session_state.calib_bottom_row = float(rows.mean())
+                st.session_state.calib_actual_h = actual_h
                 st.session_state.canvas_version += 1
                 st.rerun()
 
@@ -474,7 +506,7 @@ with col_canvas:
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
 
     elif tool == "Yatay çizgi":
-        st.caption("Tuvale istediğin yüksekliğe kısa bir iz bırak, ortalaması alınıp baştan sona düz çizgi olacak.")
+        st.caption("Kesin bir değer istediğin için fareye değil, doğrudan sayıya güveniyoruz — piksel hatası imkansız.")
         horiz_clicked = st.button("➕ Yatay Çizgiyi Ekle", use_container_width=True)
         add_clicked = False
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
@@ -548,29 +580,19 @@ if add_clicked:
             st.rerun()
 
 # ----------------------------------------------------------------------
-# ADD işlemi - Yatay çizgi (ortalama alınıp tüm genişliğe yayılır)
+# ADD işlemi - Yatay çizgi (sayısal girişten, %100 kesin)
 # ----------------------------------------------------------------------
 if horiz_clicked:
-    if canvas_result.image_data is None:
-        st.warning("Önce tuvale kısa bir iz bırak.")
-    else:
-        stroke_values = extract_stroke_values(
-            canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color, bar_px
-        )
-        if np.all(np.isnan(stroke_values)):
-            st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
-        else:
-            flat_value = np.nanmean(stroke_values)
-            full_values = np.full(st.session_state.total_bars, flat_value)
+    full_values = np.full(st.session_state.total_bars, float(horiz_value))
 
-            new_id = st.session_state.next_line_id
-            st.session_state.next_line_id += 1
+    new_id = st.session_state.next_line_id
+    st.session_state.next_line_id += 1
 
-            st.session_state.lines.append({
-                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
-            })
-            st.session_state.canvas_version += 1
-            st.rerun()
+    st.session_state.lines.append({
+        "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values, "visible": True,
+    })
+    st.session_state.canvas_version += 1
+    st.rerun()
 
 # ----------------------------------------------------------------------
 # Kırık çizgi - nokta ekleme / geri alma / iptal / tamamlama
