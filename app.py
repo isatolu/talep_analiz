@@ -266,15 +266,16 @@ def extract_single_point(image_data, window_size, canvas_height, y_max, target_c
     return bar, value
 
 
-def value_axis_html(canvas_height, y_max):
-    """Canvas'ın soluna, garanti şekilde görünen +/- değer etiketleri."""
+def value_axis_html(canvas_height, y_max, align="right"):
+    """Canvas'ın yanına, garanti şekilde görünen +/- değer etiketleri."""
     ticks = [y_max, y_max / 2, 0, -y_max / 2, -y_max]
     items = "".join(
         f'<div style="font-size:11px;color:#9ca3af;">{t:g}</div>' for t in ticks
     )
+    padding = "padding-right:4px;" if align == "right" else "padding-left:4px;"
     return f"""
     <div style="height:{canvas_height}px; display:flex; flex-direction:column;
-                justify-content:space-between; text-align:right; padding-right:4px;">
+                justify-content:space-between; text-align:{align}; {padding}">
         {items}
     </div>
     """
@@ -320,17 +321,20 @@ bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
     )
 
 canvas_width = CANVAS_WIDTH
-col_axis, col_canvas, col_legend = st.columns([0.06, 0.74, 0.20])
+tool = st.radio(
+    "Çizim aracı", ["Serbest çizim", "Yatay çizgi", "Kırık çizgi (nokta nokta)"],
+    horizontal=True, key="tool_select",
+)
+
+col_axis, col_canvas, col_axis_right, col_legend = st.columns([0.06, 0.74, 0.06, 0.14])
 
 with col_axis:
     st.markdown(value_axis_html(CANVAS_HEIGHT, y_max), unsafe_allow_html=True)
 
-with col_canvas:
-    tool = st.radio(
-        "Çizim aracı", ["Serbest çizim", "Yatay çizgi", "Kırık çizgi (nokta nokta)"],
-        horizontal=True, key="tool_select",
-    )
+with col_axis_right:
+    st.markdown(value_axis_html(CANVAS_HEIGHT, y_max, align="left"), unsafe_allow_html=True)
 
+with col_canvas:
     canvas_key = f"canvas_{st.session_state.canvas_version}_{total_bars}"
     active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
