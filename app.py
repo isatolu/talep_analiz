@@ -161,32 +161,41 @@ def hex_to_rgb(hex_color):
 
 def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
     arr = np.array(image_data)[:, :, :3].astype(int)
+    # Gerçek görüntü boyutunu ölç - tarayıcı canvas'ı farklı bir piksel
+    # yoğunluğunda (ör. HiDPI/retina ekranlarda 2x) render etmiş olabilir,
+    # bu durumda sabit CANVAS_HEIGHT/bar_px varsayımı YANLIŞ sonuç verir.
+    actual_h, actual_w = arr.shape[0], arr.shape[1]
+    bar_px_actual = actual_w / window_size
+
     target = np.array(hex_to_rgb(target_color_hex))
     dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
     drawn_mask = dist < tol
 
     values = np.full(window_size, np.nan)
     for j in range(window_size):
-        x0 = int(round(j * bar_px))
-        x1 = max(x0 + 1, int(round((j + 1) * bar_px)))
+        x0 = int(round(j * bar_px_actual))
+        x1 = max(x0 + 1, int(round((j + 1) * bar_px_actual)))
         rows, _ = np.where(drawn_mask[:, x0:x1])
         if len(rows) > 0:
             y_mean = rows.mean()
-            values[j] = ((canvas_height / 2 - y_mean) / (canvas_height / 2)) * y_max
+            values[j] = ((actual_h / 2 - y_mean) / (actual_h / 2)) * y_max
     return values
 
 
-def extract_single_point(image_data, canvas_height, y_max, target_color_hex, bar_px, tol=45):
+def extract_single_point(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
     """Kısa bir dokunuşun (dab) TEK bir (bar, değer) noktasına özetlenmesi - kırık çizgi aracı için."""
     arr = np.array(image_data)[:, :, :3].astype(int)
+    actual_h, actual_w = arr.shape[0], arr.shape[1]
+    bar_px_actual = actual_w / window_size
+
     target = np.array(hex_to_rgb(target_color_hex))
     dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
     drawn_mask = dist < tol
     rows, cols = np.where(drawn_mask)
     if len(rows) == 0:
         return None
-    bar = cols.mean() / bar_px
-    value = ((canvas_height / 2 - rows.mean()) / (canvas_height / 2)) * y_max
+    bar = cols.mean() / bar_px_actual
+    value = ((actual_h / 2 - rows.mean()) / (actual_h / 2)) * y_max
     return bar, value
 
 
@@ -375,7 +384,7 @@ if point_clicked:
     if canvas_result.image_data is None:
         st.warning("Önce tuvale kısa bir iz bırak.")
     else:
-        pt = extract_single_point(canvas_result.image_data, CANVAS_HEIGHT, y_max, active_color, bar_px)
+        pt = extract_single_point(canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color, bar_px)
         if pt is None:
             st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
         else:
