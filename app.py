@@ -44,6 +44,7 @@ defaults = {
     "lines": [],
     "canvas_version": 0,
     "next_line_id": 1,
+    "polyline_points": [],   # kırık çizgi modunda biriken (bar, değer) noktaları
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -113,17 +114,30 @@ with st.sidebar:
 ZERO_LINE_COLOR = "#f59e0b"  # amber - net farklı, dikkat çekici
 
 
-def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px):
+def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, bar_px, y_max):
     parts = []
+    # dikey gridler (bar bazlı)
     step = max(1, window_size // 20)
     for j in range(0, window_size + 1, step):
         bar_idx = window_start + j
         left = j * bar_px
         strong = bar_idx % (step * 4) == 0
-        color = "rgba(0,0,0,0.22)" if strong else "rgba(0,0,0,0.08)"
+        color = "rgba(0,0,0,0.35)" if strong else "rgba(0,0,0,0.15)"
         parts.append(
             f'<div style="position:absolute; left:{left:.1f}px; top:0; width:1px; '
             f'height:{canvas_height}px; background:{color};"></div>'
+        )
+    # yatay gridler (değer bazlı, y_max'ı 4 eşit dilime böl)
+    for k in range(-4, 5):
+        y_val = y_max * k / 4
+        top = canvas_height / 2 - (y_val / y_max) * (canvas_height / 2)
+        if k == 0:
+            continue  # sıfır çizgisi ayrı, aşağıda daha belirgin çiziliyor
+        strong = k % 2 == 0
+        color = "rgba(0,0,0,0.30)" if strong else "rgba(0,0,0,0.14)"
+        parts.append(
+            f'<div style="position:absolute; left:0; top:{top:.1f}px; width:{canvas_width}px; '
+            f'height:1px; background:{color};"></div>'
         )
     mid = canvas_height // 2
     parts.append(
@@ -162,6 +176,20 @@ def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_
     return values
 
 
+def extract_single_point(image_data, canvas_height, y_max, target_color_hex, bar_px, tol=45):
+    """Kısa bir dokunuşun (dab) TEK bir (bar, değer) noktasına özetlenmesi - kırık çizgi aracı için."""
+    arr = np.array(image_data)[:, :, :3].astype(int)
+    target = np.array(hex_to_rgb(target_color_hex))
+    dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
+    drawn_mask = dist < tol
+    rows, cols = np.where(drawn_mask)
+    if len(rows) == 0:
+        return None
+    bar = cols.mean() / bar_px
+    value = ((canvas_height / 2 - rows.mean()) / (canvas_height / 2)) * y_max
+    return bar, value
+
+
 def value_axis_html(canvas_height, y_max):
     """Canvas'ın soluna, garanti şekilde görünen +/- değer etiketleri."""
     ticks = [y_max, y_max / 2, 0, -y_max / 2, -y_max]
@@ -196,14 +224,20 @@ st.title("Net Talep Farkı ile Sentetik Grafik Oluşturucu")
 with st.expander("Nasıl kullanılır?", expanded=False):
     st.markdown(
         """
-1. Tuvale fare ile bir çizgi çiz. Şu an hangi renkle çizdiğin canvas'ın altında yazar —
-   bu renk, çizgiyi eklediğinde onun kalıcı rengi olacak (legend'daki ile aynı).
-2. **Çizgiyi Ekle (ADD)** ile listeye ekle — grafik otomatik güncellenir. Çizgi canvas'ta
-   **silinmeden kalır**, böylece bir sonraki çizgiyi öncekiyle kıyaslayarak çizebilirsin.
-3. İstediğin kadar çizgi ekle, listeden istediğini **Kaldır** ile sil (canvas'taki iz
-   kalabilir, sadece görsel referans amaçlıdır — hesaplamaya dahil edilmez).
-4. Tüm bar'lar tek seferde, sabit genişlikte gösterilir — artık kaydırma/pencere yok.
-   Bar sayısını artırırsan bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
+**Üç çizim aracı var (üstteki seçiciden):**
+- **Serbest çizim:** fare ile istediğin şekli çiz, ADD ile ekle.
+- **Yatay çizgi:** istediğin yüksekliğe kısa bir iz bırak, ortalaması alınıp
+  baştan sona düz bir çizgiye çevrilir.
+- **Kırık çizgi (nokta nokta):** her köşe için tuvale kısa bir iz bırakıp
+  "Nokta Ekle" de. Noktalar aralarında düz çizgilerle birleşir — kare/üçgen
+  dalga çizmek için pratik. Bitirince "Çizgiyi Tamamla" ile ekle.
+
+Hangi aracı kullanırsan kullan, sonuç aynı şekilde **Çizgiyi Ekle** listesine
+eklenir; çizgi canvas'ta silinmeden kalır (görsel referans amaçlı, hesaba
+dahil edilmez), rengi legend'daki ile aynıdır.
+
+Tüm bar'lar tek seferde, sabit genişlikte gösterilir. Bar sayısını artırırsan
+bar başına düşen piksel azalır, çizim daha hassas olmaktan çıkar.
         """
     )
 
@@ -214,11 +248,16 @@ with col_axis:
     st.markdown(value_axis_html(CANVAS_HEIGHT, y_max), unsafe_allow_html=True)
 
 with col_canvas:
+    tool = st.radio(
+        "Çizim aracı", ["Serbest çizim", "Yatay çizgi", "Kırık çizgi (nokta nokta)"],
+        horizontal=True, key="tool_select",
+    )
+
     canvas_key = f"canvas_{st.session_state.canvas_version}_{total_bars}"
     active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
     st.markdown(
-        grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px),
+        grid_overlay_html(window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px, y_max),
         unsafe_allow_html=True,
     )
     canvas_result = st_canvas(
@@ -235,7 +274,34 @@ with col_canvas:
     st.markdown(bar_axis_html(window_size, window_start, canvas_width, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
 
-    add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
+    if tool == "Serbest çizim":
+        add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
+        horiz_clicked = False
+        point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
+
+    elif tool == "Yatay çizgi":
+        st.caption("Tuvale istediğin yüksekliğe kısa bir iz bırak, ortalaması alınıp baştan sona düz çizgi olacak.")
+        horiz_clicked = st.button("➕ Yatay Çizgiyi Ekle", use_container_width=True)
+        add_clicked = False
+        point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
+
+    else:  # Kırık çizgi
+        st.caption("Her nokta için tuvale kısa bir iz bırak, sonra 'Nokta Ekle' de. Bitirince 'Çizgiyi Tamamla'.")
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            point_clicked = st.button("📍 Nokta Ekle", use_container_width=True)
+        with pc2:
+            undo_clicked = st.button("↩ Son Noktayı Sil", use_container_width=True)
+        with pc3:
+            cancel_clicked = st.button("✕ İptal", use_container_width=True)
+        n_pts = len(st.session_state.polyline_points)
+        if n_pts > 0:
+            pts_str = "  ·  ".join(f"({b:.0f}, {v:+.2f})" for b, v in st.session_state.polyline_points)
+            st.caption(f"Noktalar ({n_pts}): {pts_str}")
+        finish_clicked = st.button(
+            "✅ Çizgiyi Tamamla (ADD)", use_container_width=True, disabled=n_pts < 2,
+        )
+        add_clicked = horiz_clicked = False
 
 with col_legend:
     st.subheader("Çizgiler")
@@ -255,7 +321,7 @@ with col_legend:
                 st.rerun()
 
 # ----------------------------------------------------------------------
-# ADD işlemi
+# ADD işlemi - Serbest çizim
 # ----------------------------------------------------------------------
 if add_clicked:
     if canvas_result.image_data is None:
@@ -277,6 +343,76 @@ if add_clicked:
                 "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
             })
             st.rerun()
+
+# ----------------------------------------------------------------------
+# ADD işlemi - Yatay çizgi (ortalama alınıp tüm genişliğe yayılır)
+# ----------------------------------------------------------------------
+if horiz_clicked:
+    if canvas_result.image_data is None:
+        st.warning("Önce tuvale kısa bir iz bırak.")
+    else:
+        stroke_values = extract_stroke_values(
+            canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color, bar_px
+        )
+        if np.all(np.isnan(stroke_values)):
+            st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
+        else:
+            flat_value = np.nanmean(stroke_values)
+            full_values = np.full(st.session_state.total_bars, flat_value)
+
+            new_id = st.session_state.next_line_id
+            st.session_state.next_line_id += 1
+
+            st.session_state.lines.append({
+                "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
+            })
+            st.rerun()
+
+# ----------------------------------------------------------------------
+# Kırık çizgi - nokta ekleme / geri alma / iptal / tamamlama
+# ----------------------------------------------------------------------
+if point_clicked:
+    if canvas_result.image_data is None:
+        st.warning("Önce tuvale kısa bir iz bırak.")
+    else:
+        pt = extract_single_point(canvas_result.image_data, CANVAS_HEIGHT, y_max, active_color, bar_px)
+        if pt is None:
+            st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
+        else:
+            st.session_state.polyline_points.append(pt)
+            st.session_state.canvas_version += 1   # tuvali bir sonraki nokta için temizle
+            st.rerun()
+
+if undo_clicked and st.session_state.polyline_points:
+    st.session_state.polyline_points.pop()
+    st.rerun()
+
+if cancel_clicked:
+    st.session_state.polyline_points = []
+    st.session_state.canvas_version += 1
+    st.rerun()
+
+if finish_clicked:
+    pts = sorted(st.session_state.polyline_points, key=lambda p: p[0])
+    bars = np.array([p[0] for p in pts])
+    vals = np.array([p[1] for p in pts])
+
+    full_values = np.full(st.session_state.total_bars, np.nan)
+    lo, hi = int(np.ceil(bars.min())), int(np.floor(bars.max()))
+    lo, hi = max(lo, 0), min(hi, st.session_state.total_bars - 1)
+    if hi >= lo:
+        xs = np.arange(lo, hi + 1)
+        full_values[lo:hi + 1] = np.interp(xs, bars, vals)
+
+    new_id = st.session_state.next_line_id
+    st.session_state.next_line_id += 1
+
+    st.session_state.lines.append({
+        "id": new_id, "name": f"Line {new_id}", "color": active_color, "values": full_values,
+    })
+    st.session_state.polyline_points = []
+    st.session_state.canvas_version += 1
+    st.rerun()
 
 
 # ----------------------------------------------------------------------
