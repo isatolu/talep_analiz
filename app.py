@@ -240,9 +240,9 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
     )
 
     return f"""
-    <div style="position:relative; height:0; margin-bottom:-6px;">
+    <div style="position:relative; height:0; margin-top:-{canvas_height}px;">
       <div style="position:absolute; top:0; left:0; width:{canvas_width}px;
-                  height:{canvas_height}px; pointer-events:none; z-index:999;">
+                  height:{canvas_height}px; pointer-events:none; z-index:999; overflow:visible;">
         {''.join(parts)}
         {svg_layer}
       </div>
@@ -449,6 +449,17 @@ with col_canvas:
     canvas_key = f"canvas_{st.session_state.canvas_version}_{total_bars}"
     active_color = LINE_PALETTE[(st.session_state.next_line_id - 1) % len(LINE_PALETTE)]
 
+    canvas_result = st_canvas(
+        fill_color="rgba(255,255,255,0)",
+        stroke_width=2,
+        stroke_color=active_color,
+        background_color="#FFFFFF",
+        update_streamlit=True,
+        height=CANVAS_HEIGHT,
+        width=canvas_width,
+        drawing_mode="freedraw",
+        key=canvas_key,
+    )
     st.markdown(
         grid_overlay_html(
             window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px, y_max,
@@ -461,17 +472,6 @@ with col_canvas:
             preview_value=horiz_value if tool == "Yatay çizgi" else None,
         ),
         unsafe_allow_html=True,
-    )
-    canvas_result = st_canvas(
-        fill_color="rgba(255,255,255,0)",
-        stroke_width=2,
-        stroke_color=active_color,
-        background_color="#FFFFFF",
-        update_streamlit=True,
-        height=CANVAS_HEIGHT,
-        width=canvas_width,
-        drawing_mode="freedraw",
-        key=canvas_key,
     )
     st.markdown(bar_axis_html(window_size, window_start, canvas_width, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
