@@ -329,18 +329,20 @@ def extract_single_point(image_data, window_size, canvas_height, y_max, target_c
 
 
 def value_axis_html(canvas_height, y_max, align="right"):
-    """Canvas'ın yanına, garanti şekilde görünen +/- değer etiketleri."""
+    """Canvas'ın yanına, grid çizgileriyle BİREBİR AYNI matematiği (aynı kalibre
+    merkez/yarı-yükseklik) kullanarak, mutlak piksel konumunda değer etiketleri.
+    Önceki flexbox tabanlı versiyon gridle tutarsızdı - bu artık garanti tutarlı."""
+    center, half = css_center_half(canvas_height)
     ticks = [y_max, y_max / 2, 0, -y_max / 2, -y_max]
-    items = "".join(
-        f'<div style="font-size:11px;color:#9ca3af;">{t:g}</div>' for t in ticks
-    )
-    padding = "padding-right:4px;" if align == "right" else "padding-left:4px;"
-    return f"""
-    <div style="height:{canvas_height}px; display:flex; flex-direction:column;
-                justify-content:space-between; text-align:{align}; {padding}">
-        {items}
-    </div>
-    """
+    side = "right" if align == "right" else "left"
+    items = []
+    for t in ticks:
+        top = center - (t / y_max) * half
+        items.append(
+            f'<div style="position:absolute; top:{top - 7:.1f}px; {side}:4px; '
+            f'font-size:11px; color:#9ca3af;">{t:g}</div>'
+        )
+    return f'<div style="position:relative; height:{canvas_height}px;">{"".join(items)}</div>'
 
 
 def bar_axis_html(window_size, window_start, canvas_width, bar_px):
@@ -364,13 +366,14 @@ with st.expander("Nasıl kullanılır?", expanded=False):
     st.markdown(
         """
 **Üç çizim aracı var (üstteki seçiciden):**
-- **Serbest çizim:** fare ile istediğin şekli çiz, ADD ile ekle.
-- **Yatay çizgi:** istediğin yüksekliğe kısa bir iz bırak, ortalaması alınıp
-  baştan sona düz bir çizgiye çevrilir.
-- **Kırık çizgi (nokta nokta):** her köşe için tuvale kısa bir iz bırakıp
-  "Nokta Ekle" de — eklediğin noktalar tuval üzerinde numaralı daireler
-  olarak, aralarındaki kesikli çizgiyle birlikte görünür. Bitirince
-  "Çizgiyi Tamamla" ile ekle.
+- **Serbest çizim:** fare ile istediğin (yaklaşık) şekli çiz, ADD ile ekle — organik
+  dalgalar için, piksel kesinliği gerekmez.
+- **Yatay çizgi:** kaydırıcıdan kesin değeri seç (canvas'ta kesikli önizlemesini
+  görürsün), "Ekle" de — %100 kesin, fareye hiç gerek yok.
+- **Kırık çizgi (nokta nokta):** her köşe için Bar/Değer kaydırıcılarını ayarla
+  (canvas'ta o an nerede duracağını önizlersin), "Nokta Ekle" de. Noktalar
+  aralarında düz çizgilerle birleşir — kare/üçgen dalga gibi kesin köşeli
+  şekiller için ideal, yine %100 kesin. Bitirince "Çizgiyi Tamamla" ile ekle.
 
 **Eklediğin tüm çizgiler, tuvalin üzerinde kendi renkleriyle kalıcı olarak
 çizili kalır** (gerçek veriden, piksel tahmini değil) — böylece çizim
@@ -419,6 +422,21 @@ if tool == "Yatay çizgi":
         min_value=-float(y_max), max_value=float(y_max), value=0.0, step=0.1, key="horiz_value_slider",
     )
 
+point_bar, point_value = 0, 0.0
+if tool == "Kırık çizgi (nokta nokta)":
+    st.caption("Kesin köşe noktaları için fareye değil, sayıya güveniyoruz — önizlemesini canvas'ta göreceksin.")
+    pc_a, pc_b = st.columns(2)
+    with pc_a:
+        point_bar = st.slider(
+            "Nokta - Bar", min_value=0, max_value=st.session_state.total_bars - 1,
+            value=0, step=1, key="point_bar_slider",
+        )
+    with pc_b:
+        point_value = st.slider(
+            "Nokta - Değer", min_value=-float(y_max), max_value=float(y_max),
+            value=0.0, step=0.1, key="point_value_slider",
+        )
+
 col_axis, col_canvas, col_axis_right, col_legend = st.columns([0.06, 0.74, 0.06, 0.14])
 
 with col_axis:
@@ -435,7 +453,10 @@ with col_canvas:
         grid_overlay_html(
             window_size, window_start, canvas_width, CANVAS_HEIGHT, bar_px, y_max,
             lines=st.session_state.lines,
-            polyline_points=st.session_state.polyline_points if tool == "Kırık çizgi (nokta nokta)" else [],
+            polyline_points=(
+                st.session_state.polyline_points + [(float(point_bar), float(point_value))]
+                if tool == "Kırık çizgi (nokta nokta)" else []
+            ),
             preview_color=active_color,
             preview_value=horiz_value if tool == "Yatay çizgi" else None,
         ),
@@ -512,7 +533,7 @@ with col_canvas:
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
 
     else:  # Kırık çizgi
-        st.caption("Her nokta için tuvale kısa bir iz bırak, sonra 'Nokta Ekle' de. Bitirince 'Çizgiyi Tamamla'.")
+        st.caption("Yukarıdaki Bar/Değer kaydırıcılarıyla köşeyi seç, 'Nokta Ekle' de. Bitirince 'Çizgiyi Tamamla'.")
         pc1, pc2, pc3 = st.columns(3)
         with pc1:
             point_clicked = st.button("📍 Nokta Ekle", use_container_width=True)
@@ -598,16 +619,8 @@ if horiz_clicked:
 # Kırık çizgi - nokta ekleme / geri alma / iptal / tamamlama
 # ----------------------------------------------------------------------
 if point_clicked:
-    if canvas_result.image_data is None:
-        st.warning("Önce tuvale kısa bir iz bırak.")
-    else:
-        pt = extract_single_point(canvas_result.image_data, window_size, CANVAS_HEIGHT, y_max, active_color, bar_px)
-        if pt is None:
-            st.warning("Bu renkte bir çizim algılanamadı, tekrar dener misin?")
-        else:
-            st.session_state.polyline_points.append(pt)
-            st.session_state.canvas_version += 1   # tuvali bir sonraki nokta için temizle
-            st.rerun()
+    st.session_state.polyline_points.append((float(point_bar), float(point_value)))
+    st.rerun()
 
 if undo_clicked and st.session_state.polyline_points:
     st.session_state.polyline_points.pop()
