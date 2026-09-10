@@ -216,7 +216,7 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
     )
 
     return f"""
-    <div style="position:relative; height:0; margin-bottom:-16px;">
+    <div style="position:relative; height:0; margin-bottom:-6px;">
       <div style="position:absolute; top:0; left:0; width:{canvas_width}px;
                   height:{canvas_height}px; pointer-events:none; z-index:999;">
         {''.join(parts)}
