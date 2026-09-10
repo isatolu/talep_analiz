@@ -204,7 +204,7 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
         )
     mid = canvas_height // 2
     parts.append(
-        f'<div style="position:absolute; left:0; top:{mid}px; width:{canvas_width}px; '
+        f'<div style="position:absolute; left:0; top:{mid - 1}px; width:{canvas_width}px; '
         f'height:2px; background:{ZERO_LINE_COLOR}; box-shadow:0 0 3px {ZERO_LINE_COLOR};"></div>'
     )
 
@@ -229,6 +229,28 @@ def grid_overlay_html(window_size, window_start, canvas_width, canvas_height, ba
 def hex_to_rgb(hex_color):
     hex_color = hex_color.lstrip("#")
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def debug_stats(image_data, target_color_hex, y_max, tol=45):
+    """Geçici teşhis: ham piksel ölçümlerini döndürür - gerçek tarayıcıdaki
+    olası kayma/ölçek sorununu kör tahmin etmeden teşhis edebilmek için."""
+    if image_data is None:
+        return None
+    arr = np.array(image_data)[:, :, :3].astype(int)
+    actual_h, actual_w = arr.shape[0], arr.shape[1]
+    target = np.array(hex_to_rgb(target_color_hex))
+    dist = np.sqrt(((arr - target) ** 2).sum(axis=2))
+    drawn_mask = dist < tol
+    rows, cols = np.where(drawn_mask)
+    if len(rows) == 0:
+        return {"actual_h": actual_h, "actual_w": actual_w, "n_matched": 0}
+    row_mean = rows.mean()
+    value = ((actual_h / 2 - row_mean) / (actual_h / 2)) * y_max
+    return {
+        "actual_h": actual_h, "actual_w": actual_w, "n_matched": int(len(rows)),
+        "row_min": int(rows.min()), "row_max": int(rows.max()), "row_mean": round(float(row_mean), 2),
+        "computed_value": round(float(value), 3),
+    }
 
 
 def extract_stroke_values(image_data, window_size, canvas_height, y_max, target_color_hex, bar_px, tol=45):
@@ -365,6 +387,20 @@ with col_canvas:
     )
     st.markdown(bar_axis_html(window_size, window_start, canvas_width, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
+
+    with st.expander("🔧 Teşhis bilgisi (geçici, hata ayıklamak için)", expanded=False):
+        stats = debug_stats(canvas_result.image_data, active_color, y_max)
+        if stats is None:
+            st.caption("Henüz çizim yok.")
+        elif stats.get("n_matched", 0) == 0:
+            st.caption(f"Bu renkte piksel bulunamadı. Görüntü boyutu: {stats['actual_h']}×{stats['actual_w']}")
+        else:
+            st.json(stats)
+            st.caption(
+                f"Beklenen: row_mean ≈ actual_h/2 = {stats['actual_h']/2:.1f} olduğunda değer 0 çıkmalı. "
+                f"Sıfır çizgisinde çizip buradaki 'computed_value' 0'dan belirgin farklıysa, "
+                f"row_mean'in actual_h/2'den ne kadar saptığını (fark) bana söyle."
+            )
 
     if tool == "Serbest çizim":
         add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
