@@ -259,18 +259,36 @@ export default function(component) {
         return { x, y };
     }
 
+    function drawSegment(from, to) {
+        ctx.strokeStyle = activeColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+    }
+
     function onDown(e) {
+        canvas.setPointerCapture(e.pointerId);
         drawingPoints = [getPos(e)];
     }
     function onMove(e) {
         if (!drawingPoints) return;
-        drawingPoints.push(getPos(e));
-        redraw();
-        ctx.strokeStyle = activeColor;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        drawingPoints.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-        ctx.stroke();
+        // getCoalescedEvents(): tarayıcı, ekran yenileme hızından daha sık örneklenen
+        // GERÇEK donanım fare hareketlerini tek bir olayda birleştirip bize sadece
+        // sonuncusunu gösterebilir. Bu fonksiyon UYDURMA/interpolasyon değil, ara
+        // noktaları DA içeren TÜM gerçek örnekleri döndürür - hiç veri kaybetmeden.
+        const events = (typeof e.getCoalescedEvents === "function") ? e.getCoalescedEvents() : [e];
+        const evs = events.length > 0 ? events : [e];
+        evs.forEach(ev => {
+            const pos = getPos(ev);
+            const last = drawingPoints[drawingPoints.length - 1];
+            drawingPoints.push(pos);
+            // Performans için tüm canvas'ı yeniden çizmek yerine sadece yeni
+            // segmenti ekliyoruz - bu da tarayıcının daha fazla olay işleyebilmesini
+            // (dolayısıyla daha az veri kaybını) sağlıyor.
+            drawSegment(last, pos);
+        });
     }
     function finishStroke() {
         if (!drawingPoints || drawingPoints.length < 2) { drawingPoints = null; return; }
@@ -281,16 +299,17 @@ export default function(component) {
     function onUp() { finishStroke(); }
     function onLeave() { if (drawingPoints) finishStroke(); }
 
-    canvas.addEventListener("mousedown", onDown);
-    canvas.addEventListener("mousemove", onMove);
-    canvas.addEventListener("mouseup", onUp);
-    canvas.addEventListener("mouseleave", onLeave);
+    canvas.addEventListener("pointerdown", onDown);
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerup", onUp);
+    canvas.addEventListener("pointerleave", onLeave);
+    canvas.style.touchAction = "none";
 
     return () => {
-        canvas.removeEventListener("mousedown", onDown);
-        canvas.removeEventListener("mousemove", onMove);
-        canvas.removeEventListener("mouseup", onUp);
-        canvas.removeEventListener("mouseleave", onLeave);
+        canvas.removeEventListener("pointerdown", onDown);
+        canvas.removeEventListener("pointermove", onMove);
+        canvas.removeEventListener("pointerup", onUp);
+        canvas.removeEventListener("pointerleave", onLeave);
     };
 }
 """
