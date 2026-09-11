@@ -290,9 +290,28 @@ export default function(component) {
             drawSegment(last, pos);
         });
     }
+    function densify(points) {
+        // Ekranda iki nokta arasını düz çizgiyle birleştirip çiziyoruz; veri
+        // çıkarımının da AYNI düz çizgiyi kapsaması için (gördüğünle veri
+        // arasında fark olmasın diye) burada da aynı segmentleri dolduruyoruz.
+        const out = [points[0]];
+        for (let i = 1; i < points.length; i++) {
+            const a = out[out.length - 1];
+            const b = points[i];
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const steps = Math.max(1, Math.ceil(dist / (barPx * 0.5)));
+            for (let s = 1; s <= steps; s++) {
+                const t = s / steps;
+                out.push({ x: a.x + dx * t, y: a.y + dy * t });
+            }
+        }
+        return out;
+    }
     function finishStroke() {
         if (!drawingPoints || drawingPoints.length < 2) { drawingPoints = null; return; }
-        const pts = drawingPoints.map(p => ({ bar: p.x / barPx, value: yToValue(p.y) }));
+        const dense = densify(drawingPoints);
+        const pts = dense.map(p => ({ bar: p.x / barPx, value: yToValue(p.y) }));
         setTriggerValue("stroke_done", pts);
         drawingPoints = null;
     }
