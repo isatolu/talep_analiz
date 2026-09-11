@@ -46,6 +46,7 @@ defaults = {
     "next_line_id": 1,
     "polyline_points": [],   # kırık çizgi modunda biriken (bar, değer) noktaları
     "pending_stroke": None,  # serbest çizimde son tamamlanan çizginin (bar,değer) noktaları
+    "canvas_nonce": 0,  # canvas'ın yeniden çizilmesini garanti etmek için değişiklik sayacı
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -440,6 +441,7 @@ with col_canvas:
             "preview_type": preview_type,
             "preview_value": preview_value,
             "preview_points": preview_points_payload,
+            "nonce": st.session_state.canvas_nonce,
         },
         on_stroke_done_change=lambda: None,
         key="draw_canvas_main",
@@ -456,11 +458,16 @@ with col_canvas:
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
 
     if tool == "Serbest çizim":
-        add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            add_clicked = st.button("➕ Çizgiyi Ekle (ADD)", use_container_width=True)
+        with fc2:
+            clear_stroke_clicked = st.button("🧹 Temizle (son çizimi sil)", use_container_width=True)
         horiz_clicked = False
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
 
     elif tool == "Yatay çizgi":
+        clear_stroke_clicked = False
         horiz_clicked = st.button("➕ Yatay Çizgiyi Ekle", use_container_width=True)
         add_clicked = False
         point_clicked = finish_clicked = undo_clicked = cancel_clicked = False
@@ -480,7 +487,7 @@ with col_canvas:
         finish_clicked = st.button(
             "✅ Çizgiyi Tamamla (ADD)", use_container_width=True, disabled=n_pts < 2,
         )
-        add_clicked = horiz_clicked = False
+        add_clicked = horiz_clicked = clear_stroke_clicked = False
 
 with col_legend:
     st.subheader("Çizgiler")
@@ -510,8 +517,11 @@ with col_legend:
 # ----------------------------------------------------------------------
 # ADD işlemi - Serbest çizim (canvas'tan gelen (bar, değer) noktalarından)
 # ----------------------------------------------------------------------
-# ADD işlemi - Serbest çizim (canvas'tan gelen (bar, değer) noktalarından)
-# ----------------------------------------------------------------------
+if clear_stroke_clicked:
+    st.session_state.pending_stroke = None
+    st.session_state.canvas_nonce += 1
+    st.rerun()
+
 if add_clicked and tool == "Serbest çizim":
     points = st.session_state.pending_stroke
     if not points:
