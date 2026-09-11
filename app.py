@@ -45,6 +45,7 @@ defaults = {
     "lines": [],
     "next_line_id": 1,
     "polyline_points": [],   # kırık çizgi modunda biriken (bar, değer) noktaları
+    "pending_stroke": None,  # serbest çizimde son tamamlanan çizginin (bar,değer) noktaları
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -407,6 +408,12 @@ with col_canvas:
         width=CANVAS_WIDTH,
         height=CANVAS_HEIGHT,
     )
+    # ÖNEMLİ: stroke_done bir trigger değeri, sadece çizim biten anki rerun'da
+    # dolu oluyor, hemen sonrasında (örn. ADD'e basınca) otomatik sıfırlanıyor.
+    # Bu yüzden gelir gelmez kalıcı hafızaya (session_state) kaydediyoruz.
+    if canvas_result.stroke_done:
+        st.session_state.pending_stroke = canvas_result.stroke_done
+
     st.markdown(bar_axis_html(total_bars, CANVAS_WIDTH, bar_px), unsafe_allow_html=True)
     st.caption(f"Şu an çizdiğin renk: **{active_color}** (bu, eklendiğinde bu çizginin rengi olacak)")
 
@@ -465,18 +472,22 @@ with col_legend:
 # ----------------------------------------------------------------------
 # ADD işlemi - Serbest çizim (canvas'tan gelen (bar, değer) noktalarından)
 # ----------------------------------------------------------------------
-if tool == "Serbest çizim" and canvas_result.stroke_done:
-    points = canvas_result.stroke_done
-    bars = np.array([p["bar"] for p in points])
-    vals = np.array([p["value"] for p in points])
+# ADD işlemi - Serbest çizim (canvas'tan gelen (bar, değer) noktalarından)
+# ----------------------------------------------------------------------
+if add_clicked and tool == "Serbest çizim":
+    points = st.session_state.pending_stroke
+    if not points:
+        st.warning("Önce tuvale bir çizgi çiz.")
+    else:
+        bars = np.array([p["bar"] for p in points])
+        vals = np.array([p["value"] for p in points])
 
-    stroke_values = np.full(total_bars, np.nan)
-    for j in range(total_bars):
-        mask = (bars >= j) & (bars < j + 1)
-        if mask.any():
-            stroke_values[j] = vals[mask].mean()
+        stroke_values = np.full(total_bars, np.nan)
+        for j in range(total_bars):
+            mask = (bars >= j) & (bars < j + 1)
+            if mask.any():
+                stroke_values[j] = vals[mask].mean()
 
-    if add_clicked:
         if np.all(np.isnan(stroke_values)):
             st.warning("Çizim algılanamadı, tekrar dener misin?")
         else:
@@ -486,6 +497,7 @@ if tool == "Serbest çizim" and canvas_result.stroke_done:
                 "id": new_id, "name": f"Line {new_id}", "color": active_color,
                 "values": stroke_values, "visible": True,
             })
+            st.session_state.pending_stroke = None
             st.rerun()
 
 # ----------------------------------------------------------------------
